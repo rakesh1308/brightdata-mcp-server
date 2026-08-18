@@ -19,7 +19,18 @@ import re
 import argparse
 import requests
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+
+# Pre-flight check: ensure fastmcp is available — fail fast with a clear message
+try:
+    from mcp.server.fastmcp import FastMCP
+except ImportError as e:
+    sys.stderr.write(
+        "ERROR: Cannot import mcp.server.fastmcp.\n"
+        "On local: run `pip install -r requirements.txt`\n"
+        "On Zeabur: rebuild the Docker image — the install step failed.\n"
+        f"Underlying error: {e}\n"
+    )
+    sys.exit(1)
 
 load_dotenv()
 
