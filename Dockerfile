@@ -31,12 +31,13 @@ USER mcpuser
 # Expose HTTP port
 EXPOSE 8080
 
-# Default environment — HTTP transport for Zeabur
+# Default environment — HTTP transport for Zeabur (stateless, JSON responses)
 ENV PYTHONUNBUFFERED=1 \
     MCP_TRANSPORT=http \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=8080 \
-    MCP_PATH=/mcp
+    MCP_PATH=/mcp \
+    MCP_STATELESS=true
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

@@ -77,12 +77,18 @@ MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8080"))
 MCP_PATH = os.getenv("MCP_PATH", "/mcp")
 
+# Stateless HTTP mode avoids session timeouts — each POST /mcp request is independent.
+# This is critical for Zeabur/Hugging Face/etc. where idle sessions get killed.
+MCP_STATELESS = os.getenv("MCP_STATELESS", "true").lower() in ("1", "true", "yes")
+
 mcp = FastMCP(
     "brightdata-custom",
     host=MCP_HOST,
     port=MCP_PORT,
-    # FastMCP uses "sse" or "streamable-http" for HTTP transports
-    # We expose /mcp as the MCP endpoint path
+    # Stateless mode — no session lifecycle, no "session terminated" errors
+    stateless_http=MCP_STATELESS,
+    # Use JSON responses instead of SSE for simpler, more reliable HTTP transport
+    json_response=True,
 )
 
 
@@ -630,16 +636,23 @@ def run_server():
 
     print(f"[brightdata-mcp] Starting server", file=sys.stderr)
     print(f"[brightdata-mcp] Transport: {transport}", file=sys.stderr)
+    print(f"[brightdata-mcp] Host: {args.host}, Port: {args.port}, Path: {args.path}", file=sys.stderr)
+    print(f"[brightdata-mcp] Stateless HTTP: {MCP_STATELESS}", file=sys.stderr)
+    print(f"[brightdata-mcp] JSON responses: True", file=sys.stderr)
     print(f"[brightdata-mcp] API token configured: {bool(API_TOKEN and API_TOKEN != 'YOUR_API_KEY')}", file=sys.stderr)
 
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport == "http":
         # streamable-http is the modern HTTP transport for MCP
-        mcp.run(transport="streamable-http")
+        # Stateless + JSON mode — no session lifecycle, no "session terminated" errors
+        mcp.run(
+            transport="streamable-http",
+            mount_path=args.path,
+        )
     elif transport == "sse":
         # Legacy SSE transport (kept for older clients)
-        mcp.run(transport="sse")
+        mcp.run(transport="sse", mount_path=args.path)
     else:
         raise ValueError(f"Unknown transport: {transport}")
 
