@@ -17,8 +17,17 @@ import time
 import json
 import re
 import argparse
+import warnings
 import requests
 from dotenv import load_dotenv
+
+# Suppress noisy pydantic-settings warning about the FastMCP `lifespan` field
+# (forward reference inside FastMCP — harmless to our use, but clutters logs)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*IncompleteFieldDefinitionWarning.*",
+    category=UserWarning,
+)
 
 # Pre-flight check: ensure fastmcp is available — fail fast with a clear message
 try:
