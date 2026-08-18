@@ -1,7 +1,7 @@
 {
   "$schema": "https://zeabur.com/schema.json",
   "name": "brightdata-mcp",
-  "description": "Custom Bright Data MCP server with 17 tools for scraping, SERP, web unlocker, browser automation, and proxy infrastructure.",
+  "description": "Custom Bright Data MCP server with 17 tools (scraping, SERP, web unlocker, browser automation, proxy). Exposed over HTTP/SSE for remote MCP clients.",
   "template": "docker",
   "spec": {
     "port": 8080,
@@ -12,15 +12,15 @@
       },
       "SERP_ZONE": {
         "default": "serp_api1",
-        "required": false
+        "required": true
       },
       "WEB_UNLOCKER_ZONE": {
         "default": "unlocker",
-        "required": false
+        "required": true
       },
       "BROWSER_ZONE": {
         "default": "browser_api1",
-        "required": false
+        "required": true
       },
       "BRIGHTDATA_CUSTOMER_ID": {
         "default": "",
@@ -31,11 +31,19 @@
         "required": false
       },
       "MCP_TRANSPORT": {
-        "default": "stdio",
+        "default": "http",
         "required": false
       },
-      "PORT": {
+      "MCP_HOST": {
+        "default": "0.0.0.0",
+        "required": false
+      },
+      "MCP_PORT": {
         "default": "8080",
+        "required": false
+      },
+      "MCP_PATH": {
+        "default": "/mcp",
         "required": false
       }
     }

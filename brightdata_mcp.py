@@ -2,17 +2,21 @@
 Custom Bright Data MCP Server
 Wraps all Bright Data APIs into MCP tools for Claude, Cursor, and MCP clients.
 
-Install:  pip install mcp requests python-dotenv
-Run:      python brightdata_mcp.py
+Install:  pip install -r requirements.txt
+Run:      python brightdata_mcp.py                       # stdio (local)
+          python brightdata_mcp.py --transport http      # HTTP/SSE (remote)
+          python brightdata_mcp.py --transport http --port 8080 --host 0.0.0.0
 Config:   Set BRIGHTDATA_API_TOKEN in .env or environment
 
-Deployment: Zeabur (Docker-based)
+Deployment: Zeabur (Docker-based) — uses HTTP transport
 """
 
 import os
+import sys
 import time
 import json
 import re
+import argparse
 import requests
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -48,7 +52,72 @@ DATASET_IDS = {
 }
 
 # ─── Initialize MCP Server ───────────────────────────────────────
-mcp = FastMCP("brightdata-custom")
+MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()
+MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
+MCP_PORT = int(os.getenv("MCP_PORT", "8080"))
+MCP_PATH = os.getenv("MCP_PATH", "/mcp")
+
+mcp = FastMCP(
+    "brightdata-custom",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    # FastMCP uses "sse" or "streamable-http" for HTTP transports
+    # We expose /mcp as the MCP endpoint path
+)
+
+
+# ─── Health / Info endpoints (for Zeabur, monitoring, dashboards) ──
+@mcp.custom_route("/health", methods=["GET"])
+def health(request):
+    """Health check endpoint."""
+    from starlette.responses import JSONResponse
+    return JSONResponse({
+        "status": "ok",
+        "server": "brightdata-custom",
+        "transport": MCP_TRANSPORT,
+        "token_configured": bool(API_TOKEN and API_TOKEN != "YOUR_API_KEY"),
+    })
+
+
+@mcp.custom_route("/", methods=["GET"])
+def root(request):
+    """Root endpoint with server info."""
+    from starlette.responses import JSONResponse
+    return JSONResponse({
+        "name": "brightdata-mcp",
+        "version": "1.0.0",
+        "mcp_endpoint": MCP_PATH,
+        "transport": MCP_TRANSPORT,
+        "tools": 17,
+    })
+
+
+def parse_args():
+    """Parse CLI arguments (override env vars)."""
+    parser = argparse.ArgumentParser(description="Bright Data MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http", "sse"],
+        default=MCP_TRANSPORT,
+        help="MCP transport (default: stdio, use http for remote)",
+    )
+    parser.add_argument(
+        "--host",
+        default=MCP_HOST,
+        help="Host to bind (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=MCP_PORT,
+        help="Port to bind (default: 8080)",
+    )
+    parser.add_argument(
+        "--path",
+        default=MCP_PATH,
+        help="MCP endpoint path (default: /mcp)",
+    )
+    return parser.parse_args()
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -521,5 +590,26 @@ def scrape_as_markdown(url: str) -> str:
 # RUN SERVER
 # ═════════════════════════════════════════════════════════════════
 
+def run_server():
+    """Start the MCP server with the configured transport."""
+    args = parse_args()
+    transport = args.transport
+
+    print(f"[brightdata-mcp] Starting server", file=sys.stderr)
+    print(f"[brightdata-mcp] Transport: {transport}", file=sys.stderr)
+    print(f"[brightdata-mcp] API token configured: {bool(API_TOKEN and API_TOKEN != 'YOUR_API_KEY')}", file=sys.stderr)
+
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    elif transport == "http":
+        # streamable-http is the modern HTTP transport for MCP
+        mcp.run(transport="streamable-http")
+    elif transport == "sse":
+        # Legacy SSE transport (kept for older clients)
+        mcp.run(transport="sse")
+    else:
+        raise ValueError(f"Unknown transport: {transport}")
+
+
 if __name__ == "__main__":
-    mcp.run()
+    run_server()
