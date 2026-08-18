@@ -30,6 +30,10 @@
         "default": "",
         "required": false
       },
+      "BRIGHTDATA_PROXY_ZONE": {
+        "default": "residential",
+        "required": false
+      },
       "MCP_TRANSPORT": {
         "default": "http",
         "required": false

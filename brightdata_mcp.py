@@ -677,36 +677,77 @@ def browser_interact(url: str, actions: list) -> dict:
 # ═════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def proxy_request(url: str, proxy_type: str = "residential", country: str = "in") -> dict:
+def proxy_request(
+    url: str,
+    proxy_type: str = "residential",
+    country: str = "in",
+    zone: str = None,
+) -> dict:
     """
     Make a request through Bright Data's proxy infrastructure.
     Supports residential, ISP, datacenter, and mobile proxies.
 
+    IMPORTANT: Bright Data proxy auth requires:
+        - customer ID (BRIGHTDATA_CUSTOMER_ID)
+        - zone NAME (the proxy zone you created in the dashboard)
+        - zone PASSWORD (the password set on that zone, NOT your account password)
+
     Args:
         url: Target URL
         proxy_type: "residential", "isp", "datacenter", or "mobile"
-        country: 2-letter country code for geo-targeting
+        country: 2-letter country code for geo-targeting (e.g. "in", "us", "uk")
+        zone: Zone name (defaults to env BRIGHTDATA_PROXY_ZONE,
+              then to "residential"/"isp"/"datacenter"/"mobile" based on proxy_type)
 
     Returns:
         Raw response from the target URL via proxy
     """
     proxy_host = "brd.superproxy.io"
-    proxy_port = 22225
+    # Bright Data uses different ports per proxy type:
+    #   22225 = datacenter, 33335 = residential/ISP/mobile
+    proxy_port = 22225 if proxy_type == "datacenter" else 33335
 
-    proxy_user = f"brd-customer-{os.getenv('BRIGHTDATA_CUSTOMER_ID', 'YOUR_CUSTOMER_ID')}"
-    proxy_pass = os.getenv("BRIGHTDATA_PROXY_PASSWORD", "YOUR_PROXY_PASSWORD")
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    zone_password = os.getenv("BRIGHTDATA_PROXY_PASSWORD", "")
+
+    # Resolve zone name: explicit arg > env > default by proxy_type
+    if not zone:
+        zone = os.getenv("BRIGHTDATA_PROXY_ZONE", proxy_type)
+
+    # Officially correct format from Bright Data docs:
+    #   http://brd-customer-{customerID}-zone-{zone_name}:{zone_password}@brd.superproxy.io:{port}
+    # Country targeting is passed as a query param, not in the username.
+    if not customer_id or not zone_password:
+        return {
+            "error": "Missing proxy credentials. Set BRIGHTDATA_CUSTOMER_ID and "
+                     "BRIGHTDATA_PROXY_PASSWORD in env. The password is your ZONE "
+                     "password, not your account password.",
+            "configured_customer_id": bool(customer_id),
+            "configured_zone_password": bool(zone_password),
+            "expected_format": (
+                f"http://brd-customer-{customer_id or 'YOUR_CUSTOMER_ID'}"
+                f"-zone-{zone}:YOUR_ZONE_PASSWORD"
+                f"@{proxy_host}:{proxy_port}"
+            ),
+        }
 
     proxy_url = (
-        f"http://{proxy_user}-{proxy_type}-country-{country}:"
-        f"{proxy_pass}@{proxy_host}:{proxy_port}"
+        f"http://brd-customer-{customer_id}-zone-{zone}:"
+        f"{zone_password}@{proxy_host}:{proxy_port}"
     )
     proxies = {"http": proxy_url, "https": proxy_url}
 
     try:
-        response = requests.get(url, proxies=proxies, timeout=30, verify=False)
+        response = requests.get(
+            url,
+            proxies=proxies,
+            timeout=30,
+            verify=False,
+            params={"country": country} if country else None,
+        )
         return {
             "status_code": response.status_code,
-            "content": response.text[:5000],  # Truncate for MCP response
+            "content": response.text[:5000],
             "url": response.url,
         }
     except Exception as e:
