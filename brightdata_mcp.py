@@ -87,10 +87,12 @@ mcp = FastMCP(
 
 
 # ─── Health / Info endpoints (for Zeabur, monitoring, dashboards) ──
+from starlette.responses import JSONResponse, Response
+
+
 @mcp.custom_route("/health", methods=["GET"])
 def health(request):
     """Health check endpoint."""
-    from starlette.responses import JSONResponse
     return JSONResponse({
         "status": "ok",
         "server": "brightdata-custom",
@@ -102,7 +104,6 @@ def health(request):
 @mcp.custom_route("/", methods=["GET"])
 def root(request):
     """Root endpoint with server info."""
-    from starlette.responses import JSONResponse
     return JSONResponse({
         "name": "brightdata-mcp",
         "version": "1.0.0",
@@ -110,6 +111,18 @@ def root(request):
         "transport": MCP_TRANSPORT,
         "tools": 17,
     })
+
+
+@mcp.custom_route("/favicon.ico", methods=["GET"])
+def favicon(request):
+    """Serve a tiny inline favicon to silence 404s from browsers/CLIs."""
+    # 16x16 transparent PNG
+    favicon_bytes = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000100000001008060000001ff3ff"
+        "610000004849444154789c63600100000005000157d7b1bd0000000049454e44ae"
+        "426082"
+    )
+    return Response(content=favicon_bytes, media_type="image/png")
 
 
 def parse_args():
