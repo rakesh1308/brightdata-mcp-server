@@ -18,16 +18,36 @@ import json
 import re
 import argparse
 import warnings
+import logging
 import requests
 from dotenv import load_dotenv
 
-# Suppress noisy pydantic-settings warning about the FastMCP `lifespan` field
-# (forward reference inside FastMCP — harmless to our use, but clutters logs)
+# ────────────────────────────────────────────────────────────────────
+# Suppress noisy pydantic-settings "IncompleteFieldDefinitionWarning"
+# (the warning class is named that way, but the message text actually
+#  contains "incomplete definition" / "lifespan" — we match the text).
+# This is a forward-reference inside FastMCP's settings model and is
+# harmless for our use case, but it clutters container logs.
+# ────────────────────────────────────────────────────────────────────
 warnings.filterwarnings(
     "ignore",
-    message=r".*IncompleteFieldDefinitionWarning.*",
+    message=r".*incomplete definition.*lifespan.*",
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=r".*lifespan.*incomplete definition.*",
+    category=UserWarning,
+)
+# Catch-all: any pydantic-settings UserWarning from its sources/utils module
+warnings.filterwarnings(
+    "ignore",
+    module=r"pydantic_settings\.sources\.utils",
+    category=UserWarning,
+)
+
+# Also silence pydantic_settings' internal logger if it logs the same warning
+logging.getLogger("pydantic_settings").setLevel(logging.ERROR)
 
 # Pre-flight check: ensure fastmcp is available — fail fast with a clear message
 try:
