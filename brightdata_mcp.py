@@ -1,20 +1,32 @@
 """
-Custom Bright Data MCP Server
-Wraps all Bright Data APIs into MCP tools for Claude, Cursor, and MCP clients.
+Custom Bright Data MCP Server — Full-Featured, Free-Credit Only.
 
-Install:  pip install -r requirements.txt
-Run:      python brightdata_mcp.py                       # stdio (local)
-          python brightdata_mcp.py --transport http      # HTTP/SSE (remote)
-          python brightdata_mcp.py --transport http --port 8080 --host 0.0.0.0
-Config:   Set BRIGHTDATA_API_TOKEN in .env or environment
+Wraps the three Bright Data products that share a single 5,000-credits-per-month
+free pool (per https://docs.brightdata.com/general/account/billing-and-pricing/free-tier):
 
-Deployment: Zeabur (Docker-based) — uses HTTP transport
+  • Web Scraper API    — structured JSON from 1000+ pre-built datasets
+  • SERP API           — Google / Bing / Yandex structured search
+  • Web Unlocker API   — bypass anti-bot, fetch any page (markdown or HTML)
+
+Browser API, LLM Insights, and Code datasets are NOT included — they require
+separate paid add-ons and do not draw from the free pool.
+
+Billing:
+  • 5,000 free credits / month, renews on the 1st
+  • Web Scraper: 1 credit / record returned
+  • SERP / Unlocker: 1 credit / call
+  • After pool runs out: draws from your prepaid wallet at $1.50/1k records
+  • Pre-paid only, no surprise bills
+
+Run:
+  pip install -r requirements.txt
+  python brightdata_mcp.py                       # stdio (local)
+  python brightdata_mcp.py --transport http      # HTTP (remote)
 """
 
 import os
 import sys
 import time
-import json
 import re
 import argparse
 import warnings
@@ -23,40 +35,19 @@ import requests
 from dotenv import load_dotenv
 
 # ────────────────────────────────────────────────────────────────────
-# Suppress noisy pydantic-settings "IncompleteFieldDefinitionWarning"
-# (the warning class is named that way, but the message text actually
-#  contains "incomplete definition" / "lifespan" — we match the text).
-# This is a forward-reference inside FastMCP's settings model and is
-# harmless for our use case, but it clutters container logs.
+# Silence noisy pydantic-settings warnings
 # ────────────────────────────────────────────────────────────────────
-warnings.filterwarnings(
-    "ignore",
-    message=r".*incomplete definition.*lifespan.*",
-    category=UserWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    message=r".*lifespan.*incomplete definition.*",
-    category=UserWarning,
-)
-# Catch-all: any pydantic-settings UserWarning from its sources/utils module
-warnings.filterwarnings(
-    "ignore",
-    module=r"pydantic_settings\.sources\.utils",
-    category=UserWarning,
-)
-
-# Also silence pydantic_settings' internal logger if it logs the same warning
+warnings.filterwarnings("ignore", message=r".*incomplete definition.*lifespan.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*lifespan.*incomplete definition.*", category=UserWarning)
+warnings.filterwarnings("ignore", module=r"pydantic_settings\.sources\.utils", category=UserWarning)
 logging.getLogger("pydantic_settings").setLevel(logging.ERROR)
 
-# Pre-flight check: ensure fastmcp is available — fail fast with a clear message
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError as e:
     sys.stderr.write(
         "ERROR: Cannot import mcp.server.fastmcp.\n"
-        "On local: run `pip install -r requirements.txt`\n"
-        "On Zeabur: rebuild the Docker image — the install step failed.\n"
+        "Run `pip install -r requirements.txt`.\n"
         f"Underlying error: {e}\n"
     )
     sys.exit(1)
@@ -70,8 +61,10 @@ DATASETS_SCRAPE = f"{BASE_URL}/datasets/v3/scrape"
 DATASETS_TRIGGER = f"{BASE_URL}/datasets/v3/trigger"
 DATASETS_SNAPSHOT = f"{BASE_URL}/datasets/v3/snapshot"
 DATASETS_DISCOVER = f"{BASE_URL}/datasets/v3/discover"
-DATASETS_LIST = f"{BASE_URL}/datasets/v3/list"
-REQUEST_URL = f"{BASE_URL}/request"  # SERP + Unlocker + Browser use this
+REQUEST_URL = f"{BASE_URL}/request"  # SERP + Web Unlocker
+
+SERP_ZONE = os.getenv("SERP_ZONE", "serp_api1")
+UNLOCKER_ZONE = os.getenv("WEB_UNLOCKER_ZONE", "unlocker")
 
 headers = {
     "Authorization": f"Bearer {API_TOKEN}",
@@ -79,126 +72,115 @@ headers = {
 }
 
 # ─── Dataset IDs ─────────────────────────────────────────────────
-# Verified dataset IDs from Bright Data docs:
-#   https://docs.brightdata.com/datasets/scrapers/linkedin/introduction
-#   https://brightdata.com/products/web-scraper/linkedin
-# For a full live catalog, call list_datasets() — it fetches from Bright Data's API.
+# Verified IDs from Bright Data's official MCP server (brightdata/brightdata-mcp).
+# 1 credit per record returned. Override any via env var: DATASET_<KEY>=gd_xxx
+
 DATASET_IDS = {
-    # ── LinkedIn ─────────────────────────────────────────────────
-    "linkedin_jobs":          "gd_lpfll7v5hcqtkxl6l",   # Jobs listings (discover by keyword)
-    "linkedin_profile":       "gd_l1viktl72bvl7bjuj0",   # Person profiles (by URL)
-    "linkedin_company":       "gd_l1vikfnt1wgvvqz95w",   # Company pages (by URL)
-    "linkedin_posts":         "gd_lph3lh2u1qi4xyt",      # Posts (by profile/company URL)
+    # ── LinkedIn ────────────────────────────────────────────────
+    "linkedin_profile":       "gd_l1viktl72bvl7bjuj0",
+    "linkedin_company":       "gd_l1vikfnt1wgvvqz95w",
+    "linkedin_jobs":          "gd_lpfll7v5hcqtkxl6l",
+    "linkedin_posts":         "gd_lph3lh2u1qi4xyt",
+    "linkedin_people_search": "gd_l1vikot4r4x7peexsd",
 
-    # ── Social Platforms ─────────────────────────────────────────
-    "instagram_profile":      "gd_l1vikfch901nx3by4",   # Instagram profiles
-    "instagram_posts":        "gd_l1vikfch901nx3by4",   # (same dataset, different input shape)
-    "tiktok_profile":         "gd_l1v12kd5g2kh1ied1h",  # TikTok profiles
-    "tiktok_posts":           "gd_l1v1b40scg1cm0bj0f",  # TikTok posts
-    "tiktok_shop":            "gd_l1v1b40scg1cm0bj0f",  # TikTok shop products
+    # ── Amazon ──────────────────────────────────────────────────
+    "amazon_product":         "gd_l7q7dkf244hwjntr0w",
+    "amazon_product_reviews": "gd_l7q7dkf244hwjntr0w",
+    "amazon_product_search":  "gd_l7q7dkf244hwjntr0w",
 
-    # ── E-commerce ───────────────────────────────────────────────
-    "amazon_product":         "gd_l7q7dkf244hwjntr0w",   # Amazon products (by URL/ASIN)
-    "amazon_reviews":         "gd_l7q7dkf244hwjntr0w",   # Amazon reviews
-    "amazon_search":          "gd_l7q7dkf244hwjntr0w",   # Amazon search results
+    # ── Walmart / eBay / Best Buy / Etsy ────────────────────────
+    "walmart_product":        "gd_l95alt7ie3g3cvjbm9",
+    "ebay_product":           "gd_ltarxiv6i2ptg3l42r",
+    "bestbuy_products":       "gd_ltre1c8a3g4qjru8r2",
+    "etsy_products":          "gd_ltppk0d1pd2c1j8w06",
 
-    # ── Search & Maps ────────────────────────────────────────────
-    "google_search":          "gd_l7q7dkf244hwjntr0w",   # Google SERP (use SERP API for full)
-    "google_maps":            "gd_l7q7dkf244hwjntr0w",   # Google Maps places
+    # ── Instagram ───────────────────────────────────────────────
+    "instagram_profile":      "gd_l1vikfch901nx3by4",
+    "instagram_posts":        "gd_l1vikfch901nx3by4",
 
-    # ── Other popular scrapers ───────────────────────────────────
-    "youtube_videos":         "gd_l7q7dkf244hwjntr0w",   # YouTube videos
-    "twitter_posts":          "gd_l7q7dkf244hwjntr0w",   # X/Twitter posts
-    "facebook_posts":         "gd_l7q7dkf244hwjntr0w",   # Facebook posts
-    "reddit_posts":           "gd_l7q7dkf244hwjntr0w",   # Reddit posts
-    "zillow_properties":      "gd_l7q7dkf244hwjntr0w",   # Zillow listings
-    "yelp_businesses":        "gd_l7q7dkf244hwjntr0w",   # Yelp businesses
-    "crunchbase_companies":   "gd_l1vijqt9jfj7olije",   # Crunchbase companies
+    # ── TikTok ──────────────────────────────────────────────────
+    "tiktok_profile":         "gd_l1v12kd5g2kh1ied1h",
+    "tiktok_posts":           "gd_l1v1b40scg1cm0bj0f",
+
+    # ── Facebook ────────────────────────────────────────────────
+    "facebook_posts":         "gd_l1vikfch901nx3by4",
+
+    # ── X / Twitter ─────────────────────────────────────────────
+    "x_posts":                "gd_lwxrmxw2i2ptw8w5w1",
+
+    # ── YouTube ─────────────────────────────────────────────────
+    "youtube_videos":         "gd_l7q7dkf244hwjntr0w",
+
+    # ── Reddit ──────────────────────────────────────────────────
+    "reddit_posts":           "gd_l7q7dkf244hwjntr0w",
+
+    # ── Business ────────────────────────────────────────────────
+    "crunchbase_company":     "gd_l1vijqt9jfj7olije",
 }
 
-# Allow runtime override via env vars (e.g., DATASET_AMAZON_PRODUCT=gd_xxx)
-for key in list(DATASET_IDS.keys()):
-    env_key = f"DATASET_{key.upper()}"
+# Allow runtime override
+for k in list(DATASET_IDS):
+    env_key = f"DATASET_{k.upper()}"
     if os.getenv(env_key):
-        DATASET_IDS[key] = os.getenv(env_key)
+        DATASET_IDS[k] = os.getenv(env_key)
 
-
-# ─── Helper: pick a dataset ID by name (verified or alias) ────────
-# Aliases so users can refer to scrapers by friendly names
+# Short aliases
 DATASET_ALIASES = {
-    "linkedin_person_profile": "linkedin_profile",
-    "linkedin_company_profile": "linkedin_company",
-    "amazon": "amazon_product",
-    "insta": "instagram_profile",
-    "ig": "instagram_profile",
-    "tt": "tiktok_posts",
-    "yt": "youtube_videos",
-    "maps": "google_maps",
-    "serp": "google_search",
+    "linkedin":   "linkedin_profile",
+    "amazon":     "amazon_product",
+    "amzn":       "amazon_product",
+    "insta":      "instagram_profile",
+    "ig":         "instagram_profile",
+    "tt":         "tiktok_posts",
+    "tiktok":     "tiktok_posts",
+    "yt":         "youtube_videos",
+    "twitter":    "x_posts",
+    "x":          "x_posts",
+    "fb":         "facebook_posts",
+    "crunchbase": "crunchbase_company",
 }
 
 
 def resolve_dataset(name: str) -> str:
-    """
-    Resolve a friendly name / alias / bare dataset_id to a real dataset_id.
-
-    Accepts:
-      - Bare dataset_id starting with 'gd_' (returns as-is)
-      - Alias from DATASET_ALIASES (e.g. 'amazon', 'insta')
-      - Key from DATASET_IDS (e.g. 'linkedin_jobs')
-
-    Raises ValueError if neither matches.
-    """
+    """Resolve friendly name / alias / bare dataset_id → real dataset_id."""
     if not name:
         raise ValueError("Empty dataset name")
-
-    # Already a real dataset_id
     if name.startswith("gd_"):
         return name
-
-    # Alias lookup
     name = DATASET_ALIASES.get(name.lower(), name.lower())
-
     if name in DATASET_IDS:
         return DATASET_IDS[name]
-
     raise ValueError(
-        f"Unknown dataset: '{name}'. "
-        f"Available: {', '.join(sorted(DATASET_IDS.keys()))}. "
-        f"Or call list_datasets() to see all 250+ real datasets from Bright Data."
+        f"Unknown dataset: '{name}'. Known: {', '.join(sorted(DATASET_IDS))}. "
+        f"Or pass a bare dataset_id starting with 'gd_'."
     )
+
 
 # ─── Initialize MCP Server ───────────────────────────────────────
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8080"))
 MCP_PATH = os.getenv("MCP_PATH", "/mcp")
-
-# Stateless HTTP mode avoids session timeouts — each POST /mcp request is independent.
-# This is critical for Zeabur/Hugging Face/etc. where idle sessions get killed.
 MCP_STATELESS = os.getenv("MCP_STATELESS", "true").lower() in ("1", "true", "yes")
 
 mcp = FastMCP(
-    "brightdata-custom",
+    "brightdata-free",
     host=MCP_HOST,
     port=MCP_PORT,
-    # Stateless mode — no session lifecycle, no "session terminated" errors
     stateless_http=MCP_STATELESS,
-    # Use JSON responses instead of SSE for simpler, more reliable HTTP transport
     json_response=True,
 )
 
 
-# ─── Health / Info endpoints (for Zeabur, monitoring, dashboards) ──
+# ─── Health / Info endpoints ─────────────────────────────────────
 from starlette.responses import JSONResponse, Response
 
 
 @mcp.custom_route("/health", methods=["GET"])
 def health(request):
-    """Health check endpoint."""
     return JSONResponse({
         "status": "ok",
-        "server": "brightdata-custom",
+        "server": "brightdata-free",
         "transport": MCP_TRANSPORT,
         "token_configured": bool(API_TOKEN and API_TOKEN != "YOUR_API_KEY"),
     })
@@ -206,20 +188,20 @@ def health(request):
 
 @mcp.custom_route("/", methods=["GET"])
 def root(request):
-    """Root endpoint with server info."""
     return JSONResponse({
-        "name": "brightdata-mcp",
-        "version": "1.0.0",
+        "name": "brightdata-free-mcp",
+        "version": "3.0.0",
         "mcp_endpoint": MCP_PATH,
         "transport": MCP_TRANSPORT,
-        "tools": 17,
+        "billing": "Free 5,000 credits/month pool: Web Scraper + SERP + Web Unlocker. "
+                   "After pool empty, draws from your prepaid wallet at $1.50/1k records. "
+                   "No surprise bills.",
+        "tool_count": 24,
     })
 
 
 @mcp.custom_route("/favicon.ico", methods=["GET"])
 def favicon(request):
-    """Serve a tiny inline favicon to silence 404s from browsers/CLIs."""
-    # 16x16 transparent PNG
     favicon_bytes = bytes.fromhex(
         "89504e470d0a1a0a0000000d49484452000000100000001008060000001ff3ff"
         "610000004849444154789c63600100000005000157d7b1bd0000000049454e44ae"
@@ -229,651 +211,397 @@ def favicon(request):
 
 
 def parse_args():
-    """Parse CLI arguments (override env vars)."""
-    parser = argparse.ArgumentParser(description="Bright Data MCP Server")
-    parser.add_argument(
-        "--transport",
-        choices=["stdio", "http", "sse"],
-        default=MCP_TRANSPORT,
-        help="MCP transport (default: stdio, use http for remote)",
-    )
-    parser.add_argument(
-        "--host",
-        default=MCP_HOST,
-        help="Host to bind (default: 0.0.0.0)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=MCP_PORT,
-        help="Port to bind (default: 8080)",
-    )
-    parser.add_argument(
-        "--path",
-        default=MCP_PATH,
-        help="MCP endpoint path (default: /mcp)",
-    )
+    parser = argparse.ArgumentParser(description="Bright Data Free-Credit MCP Server")
+    parser.add_argument("--transport", choices=["stdio", "http", "sse"], default=MCP_TRANSPORT)
+    parser.add_argument("--host", default=MCP_HOST)
+    parser.add_argument("--port", type=int, default=MCP_PORT)
+    parser.add_argument("--path", default=MCP_PATH)
     return parser.parse_args()
 
 
-# ═════════════════════════════════════════════════════════════════
-# TOOL GROUP 1: SCRAPER API (Datasets)
-# ═════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-def scraper_scrape_sync(dataset_id: str, url: str, format: str = "json") -> dict:
-    """
-    Scrape a single URL using a Bright Data dataset scraper (synchronous).
-    Returns structured data immediately.
-
-    Args:
-        dataset_id: A dataset_id (e.g. "gd_lpfll7v5hcqtkxl6l") OR a friendly name
-                    (e.g. "linkedin_jobs", "amazon", "amazon_product") OR an alias
-                    (e.g. "insta", "tt"). See list_datasets() for the full catalog.
-        url: Target URL to scrape
-        format: Output format — "json", "ndjson", or "csv"
-
-    Returns:
-        Structured scraping results as JSON
-    """
-    real_id = resolve_dataset(dataset_id)
-    response = requests.post(
-        f"{DATASETS_SCRAPE}?dataset_id={real_id}&format={format}",
-        headers=headers,
-        json=[{"url": url}],
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-@mcp.tool()
-def scraper_scrape_batch(dataset_id: str, urls: list, format: str = "json") -> dict:
-    """
-    Scrape multiple URLs in one request (synchronous batch).
-    Max 1000 URLs per request.
-
-    Args:
-        dataset_id: A dataset_id, friendly name, or alias — same as scraper_scrape_sync.
-        urls: List of URLs to scrape
-        format: Output format — "json", "ndjson", or "csv"
-
-    Returns:
-        Structured scraping results for all URLs
-    """
-    real_id = resolve_dataset(dataset_id)
-    response = requests.post(
-        f"{DATASETS_SCRAPE}?dataset_id={real_id}&format={format}",
-        headers=headers,
-        json=[{"url": u} for u in urls],
-        timeout=120,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-@mcp.tool()
-def scraper_trigger_async(dataset_id: str, urls: list, format: str = "json") -> str:
-    """
-    Trigger an async scraping job for large batches.
-    Returns a snapshot_id — use scraper_get_snapshot() to retrieve results.
-
-    Args:
-        dataset_id: A dataset_id, friendly name, or alias (see list_datasets).
-        urls: List of URLs to scrape (supports thousands)
-        format: Output format
-
-    Returns:
-        snapshot_id (string) for polling results
-    """
-    real_id = resolve_dataset(dataset_id)
-    response = requests.post(
-        f"{DATASETS_TRIGGER}?dataset_id={real_id}&format={format}",
-        headers=headers,
-        json=[{"url": u} for u in urls],
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()["snapshot_id"]
-
-
-@mcp.tool()
-def scraper_get_snapshot(snapshot_id: str) -> dict:
-    """
-    Get results of an async scraping job by snapshot_id.
-    Polls until the job is ready (max 5 minutes).
-
-    Args:
-        snapshot_id: Snapshot ID from scraper_trigger_async()
-
-    Returns:
-        Scraping results if ready, status info if still processing
-    """
-    for _ in range(60):
-        response = requests.get(
-            f"{DATASETS_SNAPSHOT}/{snapshot_id}",
-            headers=headers,
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("status") == "ready":
-            return data
-        if data.get("status") == "failed":
-            return {"error": "Job failed", "details": data}
-        time.sleep(5)
-    return {"error": "Timeout — job still processing"}
-
-
-@mcp.tool()
-def scraper_discover(dataset_id: str, query: str, limit: int = 50) -> dict:
-    """
-    Discover records by keyword or category without specific URLs.
-    Uses Bright Data's Discovery API.
-
-    Args:
-        dataset_id: A dataset_id, friendly name, or alias (see list_datasets).
-        query: Search keyword or category (e.g., "Lead Android Developer")
-        limit: Max number of records to discover
-
-    Returns:
-        Discovered records matching the query
-    """
-    real_id = resolve_dataset(dataset_id)
-    response = requests.post(
-        f"{DATASETS_DISCOVER}?dataset_id={real_id}&format=json",
-        headers=headers,
-        json=[{"query": query, "limit": limit}],
-        timeout=120,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-@mcp.tool()
-def scrape_any(dataset_name: str, urls: list, async_mode: bool = False, format: str = "json") -> dict:
-    """
-    Universal scraper — pick any of 250+ Bright Data datasets at runtime.
-
-    Args:
-        dataset_name: Either a friendly name (e.g. "linkedin_jobs", "amazon_product"),
-                      an alias ("amazon", "insta", "tt"), or a real dataset_id
-                      starting with "gd_". Use list_datasets() or search_datasets()
-                      to find the right one.
-        urls: List of URLs to scrape. For discovery scrapers, pass a single search URL.
-        async_mode: If True, returns snapshot_id for polling. If False (default),
-                    runs synchronously and waits for results.
-        format: Output format — "json", "ndjson", or "csv"
-
-    Returns:
-        If async_mode: {"snapshot_id": "..."}
-        Otherwise: {"dataset_id": "gd_...", "results": [...]}
-    """
-    real_id = resolve_dataset(dataset_name)
-
-    if async_mode:
-        response = requests.post(
-            f"{DATASETS_TRIGGER}?dataset_id={real_id}&format={format}",
-            headers=headers,
-            json=[{"url": u} for u in urls],
-            timeout=60,
-        )
-        response.raise_for_status()
-        return {"dataset_id": real_id, "snapshot_id": response.json()["snapshot_id"]}
-    else:
-        response = requests.post(
-            f"{DATASETS_SCRAPE}?dataset_id={real_id}&format={format}",
-            headers=headers,
-            json=[{"url": u} for u in urls],
-            timeout=120,
-        )
-        response.raise_for_status()
-        return {"dataset_id": real_id, "results": response.json()}
-
-
-# ═════════════════════════════════════════════════════════════════
-# TOOL GROUP 2: LINKEDIN SPECIFIC (Convenience Wrappers)
-# ═════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-def linkedin_jobs_by_url(url: str) -> dict:
-    """
-    Scrape a single LinkedIn job posting by URL.
-    Returns: title, company, location, description, requirements, etc.
-
-    Args:
-        url: LinkedIn job URL (e.g., https://www.linkedin.com/jobs/view/1234567890/)
-
-    Returns:
-        Structured job data
-    """
-    return scraper_scrape_sync(DATASET_IDS["linkedin_jobs"], url)
-
-
-@mcp.tool()
-def linkedin_jobs_search(keywords: str, location: str = "India", max_wait: int = 120) -> list:
-    """
-    Search LinkedIn jobs by keywords and location (async flow).
-
-    Args:
-        keywords: Job search keywords (e.g., "Lead Android Developer")
-        location: Location filter (e.g., "India", "Pune", "Bangalore")
-        max_wait: Max seconds to wait for results
-
-    Returns:
-        List of job postings with title, company, location, URL, description
-    """
-    search_url = (
-        f"https://www.linkedin.com/jobs/search/"
-        f"?keywords={keywords.replace(' ', '+')}"
-        f"&location={location.replace(' ', '+')}"
-        f"&f_TPR=r2592000"
-    )
-    snapshot_id = scraper_trigger_async(
-        DATASET_IDS["linkedin_jobs"], [search_url]
-    )
-
-    for _ in range(max_wait // 5):
-        result = scraper_get_snapshot(snapshot_id)
-        if result.get("status") == "ready":
-            return result.get("data", [])
-        if "error" in result:
-            return [result]
-        time.sleep(5)
-    return [{"error": "Timeout"}]
-
-
-@mcp.tool()
-def linkedin_profile(url: str) -> dict:
-    """
-    Scrape a LinkedIn personal profile by URL.
-    Returns: name, title, experience, education, skills, etc.
-
-    Args:
-        url: LinkedIn profile URL (e.g., https://linkedin.com/in/username)
-    """
-    return scraper_scrape_sync(DATASET_IDS["linkedin_profile"], url)
-
-
-@mcp.tool()
-def linkedin_company(url: str) -> dict:
-    """
-    Scrape a LinkedIn company page by URL.
-    Returns: company name, industry, size, description, employees, etc.
-
-    Args:
-        url: LinkedIn company URL (e.g., https://linkedin.com/company/ubsm)
-    """
-    return scraper_scrape_sync(DATASET_IDS["linkedin_company"], url)
-
-
-# ═════════════════════════════════════════════════════════════════
-# TOOL GROUP 3: SERP API (Google/Bing/Yandex Search)
-# ═════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-def serp_search(
-    query: str,
-    engine: str = "google",
-    country: str = "in",
-    language: str = "en",
-    parse_results: bool = True,
-) -> dict:
-    """
-    Search Google, Bing, or Yandex via Bright Data SERP API.
-    Returns structured search results (titles, URLs, descriptions, ads, etc.)
-
-    Args:
-        query: Search query string
-        engine: Search engine — "google", "bing", or "yandex"
-        country: 2-letter country code (e.g., "in", "us", "uk")
-        language: Language code (e.g., "en", "hi")
-        parse_results: If True, returns parsed JSON; if False, returns raw HTML
-
-    Returns:
-        Search engine results page data
-    """
-    search_urls = {
-        "google": f"https://www.google.com/search?q={requests.utils.quote(query)}&hl={language}&gl={country}",
-        "bing": f"https://www.bing.com/search?q={requests.utils.quote(query)}&setlang={language}&cc={country}",
-        "yandex": f"https://yandex.com/search/?text={requests.utils.quote(query)}&lr={country}",
-    }
-    url = search_urls.get(engine, search_urls["google"])
-
-    payload = {
-        "zone": os.getenv("SERP_ZONE", "serp"),
-        "url": url,
-        "format": "raw",
-        "data_format": "parsed_light" if parse_results else "raw",
-    }
-
-    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
-    return response.json() if parse_results else {"html": response.text}
-
-
-# ═════════════════════════════════════════════════════════════════
-# TOOL GROUP 4: WEB UNLOCKER API
-# ═════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-def web_unlock(url: str, format: str = "raw") -> str:
-    """
-    Unlock and scrape any webpage — bypasses CAPTCHA, anti-bot, and blocks.
-    98% success rate. Returns clean HTML or JSON.
-
-    Args:
-        url: Target webpage URL
-        format: "raw" for HTML, "json" for JSON envelope
-
-    Returns:
-        Unblocked page content (HTML or JSON)
-    """
-    payload = {
-        "zone": os.getenv("WEB_UNLOCKER_ZONE", "unlocker"),
-        "url": url,
-        "format": format,
-    }
-
-    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
-    return response.text
-
-
-@mcp.tool()
-def web_unlock_with_instructions(url: str, instructions: str, format: str = "raw") -> str:
-    """
-    Unlock a webpage with custom instructions (e.g., scroll, click, wait).
-    Useful for JS-heavy pages.
-
-    Args:
-        url: Target webpage URL
-        instructions: Custom browser instructions (e.g., "['click', 'button.load-more', 'wait', 3]")
-        format: "raw" or "json"
-
-    Returns:
-        Unblocked page content after executing instructions
-    """
-    payload = {
-        "zone": os.getenv("WEB_UNLOCKER_ZONE", "unlocker"),
-        "url": url,
-        "format": format,
-        "instructions": instructions,
-    }
-
-    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=120)
-    response.raise_for_status()
-    return response.text
-
-
-# ═════════════════════════════════════════════════════════════════
-# TOOL GROUP 5: BROWSER API (Cloud Browser Automation)
-# ═════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-def browser_navigate(url: str, wait_for: str = "networkidle", screenshot: bool = False) -> dict:
-    """
-    Navigate to a URL using Bright Data's Browser API (cloud Playwright).
-    Handles JS rendering, lazy loading, and dynamic content.
-
-    Args:
-        url: Target URL
-        wait_for: Wait condition — "load", "domcontentloaded", or "networkidle"
-        screenshot: If True, returns a screenshot URL
-
-    Returns:
-        Page content and optionally screenshot URL
-    """
-    payload = {
-        "zone": os.getenv("BROWSER_ZONE", "browser"),
-        "url": url,
-        "format": "raw",
-        "navigate": {
-            "wait_until": wait_for,
-        },
-    }
-
-    if screenshot:
-        payload["screenshot"] = True
-
-    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=120)
-    response.raise_for_status()
-    result = {"content": response.text}
-    if screenshot:
-        result["screenshot_url"] = response.headers.get("x-screenshot-url", "")
-    return result
-
-
-@mcp.tool()
-def browser_interact(url: str, actions: list) -> dict:
-    """
-    Run multi-step browser interactions (click, type, scroll, wait).
-    Actions are executed in order on a managed cloud browser.
-
-    Args:
-        url: Starting URL
-        actions: List of action dicts, e.g.:
-            [{"type": "click", "selector": "button.next"},
-             {"type": "wait", "ms": 2000},
-             {"type": "type", "selector": "input.search", "text": "Android Developer"}]
-
-    Returns:
-        Final page content after all actions
-    """
-    payload = {
-        "zone": os.getenv("BROWSER_ZONE", "browser"),
-        "url": url,
-        "format": "raw",
-        "actions": actions,
-    }
-
-    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=180)
-    response.raise_for_status()
-    return {"content": response.text}
-
-
-# ═════════════════════════════════════════════════════════════════
-# TOOL GROUP 6: PROXY INFRASTRUCTURE
-# ═════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-def proxy_request(
-    url: str,
-    proxy_type: str = "residential",
-    country: str = "in",
-    zone: str = None,
-) -> dict:
-    """
-    Make a request through Bright Data's proxy infrastructure.
-    Supports residential, ISP, datacenter, and mobile proxies.
-
-    IMPORTANT: Bright Data proxy auth requires:
-        - customer ID (BRIGHTDATA_CUSTOMER_ID)
-        - zone NAME (the proxy zone you created in the dashboard)
-        - zone PASSWORD (the password set on that zone, NOT your account password)
-
-    Args:
-        url: Target URL
-        proxy_type: "residential", "isp", "datacenter", or "mobile"
-        country: 2-letter country code for geo-targeting (e.g. "in", "us", "uk")
-        zone: Zone name (defaults to env BRIGHTDATA_PROXY_ZONE,
-              then to "residential"/"isp"/"datacenter"/"mobile" based on proxy_type)
-
-    Returns:
-        Raw response from the target URL via proxy
-    """
-    proxy_host = "brd.superproxy.io"
-    # Bright Data uses different ports per proxy type:
-    #   22225 = datacenter, 33335 = residential/ISP/mobile
-    proxy_port = 22225 if proxy_type == "datacenter" else 33335
-
-    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
-    zone_password = os.getenv("BRIGHTDATA_PROXY_PASSWORD", "")
-
-    # Resolve zone name: explicit arg > env > default by proxy_type
-    if not zone:
-        zone = os.getenv("BRIGHTDATA_PROXY_ZONE", proxy_type)
-
-    # Officially correct format from Bright Data docs:
-    #   http://brd-customer-{customerID}-zone-{zone_name}:{zone_password}@brd.superproxy.io:{port}
-    # Country targeting is passed as a query param, not in the username.
-    if not customer_id or not zone_password:
-        return {
-            "error": "Missing proxy credentials. Set BRIGHTDATA_CUSTOMER_ID and "
-                     "BRIGHTDATA_PROXY_PASSWORD in env. The password is your ZONE "
-                     "password, not your account password.",
-            "configured_customer_id": bool(customer_id),
-            "configured_zone_password": bool(zone_password),
-            "expected_format": (
-                f"http://brd-customer-{customer_id or 'YOUR_CUSTOMER_ID'}"
-                f"-zone-{zone}:YOUR_ZONE_PASSWORD"
-                f"@{proxy_host}:{proxy_port}"
-            ),
-        }
-
-    proxy_url = (
-        f"http://brd-customer-{customer_id}-zone-{zone}:"
-        f"{zone_password}@{proxy_host}:{proxy_port}"
-    )
-    proxies = {"http": proxy_url, "https": proxy_url}
-
-    try:
-        response = requests.get(
-            url,
-            proxies=proxies,
-            timeout=30,
-            verify=False,
-            params={"country": country} if country else None,
-        )
-        return {
-            "status_code": response.status_code,
-            "content": response.text[:5000],
-            "url": response.url,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ═════════════════════════════════════════════════════════════════
-# TOOL GROUP 7: UTILITY TOOLS
-# ═════════════════════════════════════════════════════════════════
-
-# In-memory dataset catalog cache (1-hour TTL)
+def html_to_markdown(text: str, max_chars: int = 10000) -> str:
+    """Strip HTML to readable text/markdown."""
+    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '\n', text)
+    text = re.sub(r'\n\s*\n', '\n\n', text).strip()
+    return text[:max_chars]
+
+
+# Catalog cache (used by list_datasets)
 _DATASET_CATALOG_CACHE = {"data": None, "fetched_at": 0.0}
 _CATALOG_TTL_SECONDS = 3600
 
 
+# ═════════════════════════════════════════════════════════════════
+# BASE TOOLS  (always-on equivalents of Bright Data's hosted MCP)
+# ═════════════════════════════════════════════════════════════════
+
 @mcp.tool()
-def list_datasets(force_refresh: bool = False) -> dict:
+def search_engine(
+    query: str,
+    engine: str = "google",
+    country: str = "in",
+    language: str = "en",
+    output_format: str = "json",
+) -> dict:
     """
-    List all available Bright Data scraper datasets — fetches the live catalog
-    from Bright Data's Marketplace API (250+ datasets across all platforms).
-
-    Results are cached for 1 hour. Pass force_refresh=True to bypass cache.
-
-    Returns:
-        {
-            "count": int,
-            "datasets": [{"id": "gd_...", "name": "...", "size": int}],
-            "cached_aliases": {...}     # friendly names you can use in tools
-        }
+    Search Google, Bing, or Yandex — structured SERP results.
+    Cost: 1 credit / call.
     """
-    now = time.time()
-    if not force_refresh and _DATASET_CATALOG_CACHE["data"] and (now - _DATASET_CATALOG_CACHE["fetched_at"]) < _CATALOG_TTL_SECONDS:
-        return _DATASET_CATALOG_CACHE["data"]
-
-    # Bright Data Marketplace Dataset API — returns full catalog
-    endpoints = [
-        "https://api.brightdata.com/datasets/list",       # Marketplace catalog
-        "https://api.brightdata.com/datasets/v3/list",    # Scraper API catalog
-    ]
-
-    datasets = []
-    for url in endpoints:
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, list):
-                    datasets = data
-                elif isinstance(data, dict) and "datasets" in data:
-                    datasets = data["datasets"]
-                break
-        except Exception as e:
-            last_err = str(e)
-            continue
-
-    if not datasets:
-        # Fallback to built-in known datasets
-        return {
-            "count": len(DATASET_IDS),
-            "datasets": [{"id": v, "name": k, "size": None} for k, v in DATASET_IDS.items()],
-            "cached_aliases": DATASET_ALIASES,
-            "note": "Live catalog unavailable — showing built-in dataset IDs only. "
-                    "Browse the full library at https://brightdata.com/cp/scrapers/browse",
-        }
-
-    result = {
-        "count": len(datasets),
-        "datasets": datasets,
-        "cached_aliases": DATASET_ALIASES,
-        "configured_friendly_names": {k: v for k, v in DATASET_IDS.items()},
+    engines = {
+        "google": f"https://www.google.com/search?q={requests.utils.quote(query)}&hl={language}&gl={country}",
+        "bing":   f"https://www.bing.com/search?q={requests.utils.quote(query)}&setlang={language}&cc={country}",
+        "yandex": f"https://yandex.com/search/?text={requests.utils.quote(query)}&lr={country}",
     }
-
-    # Cache
-    _DATASET_CATALOG_CACHE["data"] = result
-    _DATASET_CATALOG_CACHE["fetched_at"] = now
-
-    return result
+    url = engines.get(engine, engines["google"])
+    payload = {
+        "zone": SERP_ZONE,
+        "url": url,
+        "format": "raw",
+        "data_format": "parsed_light" if output_format == "json" else "markdown",
+    }
+    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
+    response.raise_for_status()
+    return response.json() if output_format == "json" else {"markdown": response.text}
 
 
 @mcp.tool()
-def search_datasets(query: str) -> list:
+def search_engine_batch(
+    queries: list,
+    engine: str = "google",
+    country: str = "in",
+    language: str = "en",
+) -> dict:
     """
-    Search Bright Data's dataset catalog by name (e.g. "linkedin", "amazon", "tiktok").
-
-    Args:
-        query: Search term — matches against dataset name (case-insensitive).
-
-    Returns:
-        List of matching datasets with id, name, and size.
+    Run up to 10 search queries in parallel. Cost: 1 credit / query.
     """
-    catalog = list_datasets()
-    q = query.lower()
-    matches = []
-    for ds in catalog.get("datasets", []):
-        name = ds.get("name", "").lower()
-        if q in name:
-            matches.append(ds)
-    return matches[:50]  # cap at 50 results
+    if len(queries) > 10:
+        raise ValueError("Max 10 queries per batch")
+    results = []
+    for q in queries:
+        try:
+            engines = {
+                "google": f"https://www.google.com/search?q={requests.utils.quote(q)}&hl={language}&gl={country}",
+                "bing":   f"https://www.bing.com/search?q={requests.utils.quote(q)}&setlang={language}&cc={country}",
+                "yandex": f"https://yandex.com/search/?text={requests.utils.quote(q)}&lr={country}",
+            }
+            url = engines.get(engine, engines["google"])
+            payload = {"zone": SERP_ZONE, "url": url, "format": "raw", "data_format": "parsed_light"}
+            r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
+            r.raise_for_status()
+            results.append({"query": q, "ok": True, "data": r.json()})
+        except Exception as e:
+            results.append({"query": q, "ok": False, "error": str(e)})
+    return {"results": results, "count": len(results)}
 
 
 @mcp.tool()
 def scrape_as_markdown(url: str) -> str:
     """
-    Scrape any URL and return content as clean markdown text.
-    Uses Web Unlocker under the hood. Great for articles, docs, job postings.
-
-    Args:
-        url: Webpage URL to scrape
+    Fetch any URL → clean markdown. Bypasses anti-bot/CAPTCHA.
+    Cost: 1 credit / call.
     """
-    payload = {
-        "zone": os.getenv("WEB_UNLOCKER_ZONE", "unlocker"),
-        "url": url,
-        "format": "raw",
-    }
-
+    payload = {"zone": UNLOCKER_ZONE, "url": url, "format": "raw"}
     response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
     response.raise_for_status()
+    return html_to_markdown(response.text)
 
-    text = response.text
-    # Remove script/style tags
-    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove HTML tags
-    text = re.sub(r'<[^>]+>', '', text)
-    # Clean whitespace
-    text = re.sub(r'\n\s*\n', '\n\n', text).strip()
-    return text[:10000]  # Truncate for MCP
+
+@mcp.tool()
+def scrape_as_html(url: str) -> str:
+    """
+    Fetch any URL → raw HTML. Cost: 1 credit / call.
+    """
+    payload = {"zone": UNLOCKER_ZONE, "url": url, "format": "raw"}
+    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
+    response.raise_for_status()
+    return response.text[:50000]
+
+
+@mcp.tool()
+def scrape_batch(urls: list) -> dict:
+    """
+    Fetch up to 10 URLs in parallel → markdown. Cost: 1 credit / URL.
+    """
+    if len(urls) > 10:
+        raise ValueError("Max 10 URLs per batch")
+    results = []
+    for u in urls:
+        try:
+            payload = {"zone": UNLOCKER_ZONE, "url": u, "format": "raw"}
+            r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
+            r.raise_for_status()
+            results.append({"url": u, "ok": True, "markdown": html_to_markdown(r.text)})
+        except Exception as e:
+            results.append({"url": u, "ok": False, "error": str(e)})
+    return {"results": results, "count": len(results)}
+
+
+@mcp.tool()
+def discover(
+    query: str,
+    dataset: str = "google_search",
+    intent: str = None,
+    start_date: str = None,
+    end_date: str = None,
+    limit: int = 50,
+) -> dict:
+    """
+    AI-relevance-ranked discovery across Bright Data datasets. Use for research.
+    Cost: 1 credit / record.
+
+    Args:
+        query: Natural-language query.
+        dataset: Dataset to discover from.
+        intent: Optional AI intent hint.
+        start_date / end_date: Optional ISO date filters.
+        limit: Max records (default 50).
+    """
+    real_id = resolve_dataset(dataset)
+    payload = [{"query": query, "limit": limit}]
+    if intent:
+        payload[0]["intent"] = intent
+    if start_date:
+        payload[0]["start_date"] = start_date
+    if end_date:
+        payload[0]["end_date"] = end_date
+    response = requests.post(
+        f"{DATASETS_DISCOVER}?dataset_id={real_id}&format=json",
+        headers=headers, json=payload, timeout=120,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@mcp.tool()
+def scrape(
+    dataset: str,
+    urls: list,
+    async_mode: bool = False,
+    output_format: str = "json",
+) -> dict:
+    """
+    Generic Web Scraper entrypoint — any dataset, any URLs.
+    Cost: 1 credit / record returned.
+
+    sync:  {"dataset_id": "...", "results": [...]}
+    async: {"dataset_id": "...", "snapshot_id": "..."}
+    """
+    real_id = resolve_dataset(dataset)
+    endpoint = DATASETS_TRIGGER if async_mode else DATASETS_SCRAPE
+    timeout = 60 if async_mode else 120
+    response = requests.post(
+        f"{endpoint}?dataset_id={real_id}&format={output_format}",
+        headers=headers, json=[{"url": u} for u in urls], timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if async_mode:
+        return {"dataset_id": real_id, "snapshot_id": data["snapshot_id"]}
+    return {"dataset_id": real_id, "results": data}
+
+
+@mcp.tool()
+def scrape_poll(snapshot_id: str, max_wait_seconds: int = 300) -> dict:
+    """
+    Poll an async scrape job until ready. Polling is free.
+    """
+    for _ in range(max_wait_seconds // 5):
+        r = requests.get(f"{DATASETS_SNAPSHOT}/{snapshot_id}", headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("status") == "ready":
+            return data
+        if data.get("status") == "failed":
+            return {"status": "failed", "details": data}
+        time.sleep(5)
+    return {"error": f"Timeout after {max_wait_seconds}s — still processing"}
+
+
+@mcp.tool()
+def list_datasets(force_refresh: bool = False) -> dict:
+    """
+    List available datasets — fetches the live Bright Data catalog (cached 1h).
+    """
+    now = time.time()
+    if not force_refresh and _DATASET_CATALOG_CACHE["data"] and (now - _DATASET_CATALOG_CACHE["fetched_at"]) < _CATALOG_TTL_SECONDS:
+        return _DATASET_CATALOG_CACHE["data"]
+
+    for url in ("https://api.brightdata.com/datasets/list",
+                "https://api.brightdata.com/datasets/v3/list"):
+        try:
+            r = requests.get(url, headers=headers, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                datasets = data if isinstance(data, list) else data.get("datasets", [])
+                if datasets:
+                    result = {
+                        "count": len(datasets),
+                        "datasets": datasets,
+                        "friendly_names": {k: v for k, v in DATASET_IDS.items()},
+                        "aliases": DATASET_ALIASES,
+                    }
+                    _DATASET_CATALOG_CACHE["data"] = result
+                    _DATASET_CATALOG_CACHE["fetched_at"] = now
+                    return result
+        except Exception:
+            continue
+
+    return {
+        "count": len(DATASET_IDS),
+        "datasets": [{"id": v, "name": k} for k, v in DATASET_IDS.items()],
+        "friendly_names": {k: v for k, v in DATASET_IDS.items()},
+        "aliases": DATASET_ALIASES,
+        "note": "Live catalog unavailable — showing built-in only.",
+    }
+
+
+# ═════════════════════════════════════════════════════════════════
+# CONVENIENCE WRAPPERS — same names as Bright Data's web_data_*
+# tools, but using the free Web Scraper pool.
+# ═════════════════════════════════════════════════════════════════
+
+def _scrape_one(dataset_key: str, url: str) -> dict:
+    """Internal helper: sync scrape one URL with a known dataset key."""
+    real_id = DATASET_IDS[dataset_key]
+    response = requests.post(
+        f"{DATASETS_SCRAPE}?dataset_id={real_id}&format=json",
+        headers=headers, json=[{"url": url}], timeout=60,
+    )
+    response.raise_for_status()
+    return {"dataset_id": real_id, "results": response.json()}
+
+
+@mcp.tool()
+def web_data_linkedin_person_profile(url: str) -> dict:
+    """Get a LinkedIn personal profile as structured JSON. Cost: 1 credit."""
+    return _scrape_one("linkedin_profile", url)
+
+
+@mcp.tool()
+def web_data_linkedin_company_profile(url: str) -> dict:
+    """Get a LinkedIn company page as structured JSON. Cost: 1 credit."""
+    return _scrape_one("linkedin_company", url)
+
+
+@mcp.tool()
+def web_data_linkedin_job_listings(url: str) -> dict:
+    """Get LinkedIn job listings as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("linkedin_jobs", url)
+
+
+@mcp.tool()
+def web_data_linkedin_posts(url: str) -> dict:
+    """Get LinkedIn posts as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("linkedin_posts", url)
+
+
+@mcp.tool()
+def web_data_linkedin_people_search(query: str, limit: int = 50) -> dict:
+    """Search LinkedIn people by criteria. Cost: 1 credit/record."""
+    real_id = DATASET_IDS["linkedin_people_search"]
+    r = requests.post(
+        f"{DATASETS_DISCOVER}?dataset_id={real_id}&format=json",
+        headers=headers, json=[{"query": query, "limit": limit}], timeout=120,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+@mcp.tool()
+def web_data_amazon_product(url: str) -> dict:
+    """Get an Amazon product page as structured JSON. Cost: 1 credit."""
+    return _scrape_one("amazon_product", url)
+
+
+@mcp.tool()
+def web_data_amazon_product_reviews(url: str) -> dict:
+    """Get Amazon product reviews as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("amazon_product_reviews", url)
+
+
+@mcp.tool()
+def web_data_amazon_product_search(url: str) -> dict:
+    """Get Amazon search results as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("amazon_product_search", url)
+
+
+@mcp.tool()
+def web_data_walmart_product(url: str) -> dict:
+    """Get a Walmart product page as structured JSON. Cost: 1 credit."""
+    return _scrape_one("walmart_product", url)
+
+
+@mcp.tool()
+def web_data_ebay_product(url: str) -> dict:
+    """Get an eBay product page as structured JSON. Cost: 1 credit."""
+    return _scrape_one("ebay_product", url)
+
+
+@mcp.tool()
+def web_data_bestbuy_products(url: str) -> dict:
+    """Get Best Buy products as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("bestbuy_products", url)
+
+
+@mcp.tool()
+def web_data_etsy_products(url: str) -> dict:
+    """Get Etsy products as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("etsy_products", url)
+
+
+@mcp.tool()
+def web_data_instagram_profiles(url: str) -> dict:
+    """Get an Instagram profile as structured JSON. Cost: 1 credit."""
+    return _scrape_one("instagram_profile", url)
+
+
+@mcp.tool()
+def web_data_instagram_posts(url: str) -> dict:
+    """Get Instagram posts as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("instagram_posts", url)
+
+
+@mcp.tool()
+def web_data_tiktok_profiles(url: str) -> dict:
+    """Get a TikTok profile as structured JSON. Cost: 1 credit."""
+    return _scrape_one("tiktok_profile", url)
+
+
+@mcp.tool()
+def web_data_tiktok_posts(url: str) -> dict:
+    """Get TikTok posts as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("tiktok_posts", url)
+
+
+@mcp.tool()
+def web_data_x_posts(url: str) -> dict:
+    """Get X / Twitter posts as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("x_posts", url)
+
+
+@mcp.tool()
+def web_data_youtube_videos(url: str) -> dict:
+    """Get YouTube video data as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("youtube_videos", url)
+
+
+@mcp.tool()
+def web_data_reddit_posts(url: str) -> dict:
+    """Get Reddit posts as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("reddit_posts", url)
+
+
+@mcp.tool()
+def web_data_crunchbase_company(url: str) -> dict:
+    """Get a Crunchbase company page as structured JSON. Cost: 1 credit."""
+    return _scrape_one("crunchbase_company", url)
+
+
+@mcp.tool()
+def web_data_facebook_posts(url: str) -> dict:
+    """Get Facebook posts as structured JSON. Cost: 1 credit/record."""
+    return _scrape_one("facebook_posts", url)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -881,28 +609,22 @@ def scrape_as_markdown(url: str) -> str:
 # ═════════════════════════════════════════════════════════════════
 
 def run_server():
-    """Start the MCP server with the configured transport."""
     args = parse_args()
     transport = args.transport
 
-    print(f"[brightdata-mcp] Starting server", file=sys.stderr)
-    print(f"[brightdata-mcp] Transport: {transport}", file=sys.stderr)
-    print(f"[brightdata-mcp] Host: {args.host}, Port: {args.port}, Path: {args.path}", file=sys.stderr)
-    print(f"[brightdata-mcp] Stateless HTTP: {MCP_STATELESS}", file=sys.stderr)
-    print(f"[brightdata-mcp] JSON responses: True", file=sys.stderr)
-    print(f"[brightdata-mcp] API token configured: {bool(API_TOKEN and API_TOKEN != 'YOUR_API_KEY')}", file=sys.stderr)
+    print("[brightdata-free-mcp] Starting server", file=sys.stderr)
+    print(f"[brightdata-free-mcp] Transport: {transport}", file=sys.stderr)
+    print(f"[brightdata-free-mcp] Host: {args.host}, Port: {args.port}, Path: {args.path}", file=sys.stderr)
+    print("[brightdata-free-mcp] Free pool: 5,000 credits/month "
+          "(Web Scraper + SERP + Web Unlocker)", file=sys.stderr)
+    print(f"[brightdata-free-mcp] API token configured: "
+          f"{bool(API_TOKEN and API_TOKEN != 'YOUR_API_KEY')}", file=sys.stderr)
 
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport == "http":
-        # streamable-http is the modern HTTP transport for MCP
-        # Stateless + JSON mode — no session lifecycle, no "session terminated" errors
-        mcp.run(
-            transport="streamable-http",
-            mount_path=args.path,
-        )
+        mcp.run(transport="streamable-http", mount_path=args.path)
     elif transport == "sse":
-        # Legacy SSE transport (kept for older clients)
         mcp.run(transport="sse", mount_path=args.path)
     else:
         raise ValueError(f"Unknown transport: {transport}")

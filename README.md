@@ -1,6 +1,8 @@
-# Bright Data MCP Server (Custom)
+# Bright Data MCP Server (Custom, Free-Credit Only)
 
-A custom Model Context Protocol (MCP) server that wraps **all Bright Data API products** into MCP tools. Use it from Claude Desktop, Cursor, Claude Code, or any MCP-compatible client.
+A self-hosted MCP server wrapping the three Bright Data products that share the **5,000 free credits / month pool**: Web Scraper API, SERP API, and Web Unlocker API. **No paid add-ons required.**
+
+Use it from Claude Desktop, Cursor, Claude Code, or any MCP-compatible client.
 
 ## 🚀 Quick Start
 
@@ -40,7 +42,9 @@ Add to your MCP client config:
 }
 ```
 
-## 🛠️ Available Tools (17)
+## 🛠️ Available Tools (16)
+
+All tools below consume the **5,000 free credits / month** shared across Web Scraper, SERP API, Web Unlocker, and Scraper Studio. **No extra purchases required.**
 
 | # | Tool | Product | Description |
 |---|------|---------|-------------|
@@ -49,18 +53,19 @@ Add to your MCP client config:
 | 3 | `scraper_trigger_async` | Scrapers | Trigger async job (1000s of URLs) |
 | 4 | `scraper_get_snapshot` | Scrapers | Poll async job results |
 | 5 | `scraper_discover` | Discover API | Find records by keyword |
-| 6 | `linkedin_jobs_by_url` | LinkedIn Jobs | Scrape single job posting |
-| 7 | `linkedin_jobs_search` | LinkedIn Jobs | Search jobs by keyword+location |
-| 8 | `linkedin_profile` | LinkedIn | Scrape person profile |
-| 9 | `linkedin_company` | LinkedIn | Scrape company page |
-| 10 | `serp_search` | SERP API | Google/Bing/Yandex search |
-| 11 | `web_unlock` | Web Unlocker | Unblock any webpage |
-| 12 | `web_unlock_with_instructions` | Web Unlocker | Unblock with custom actions |
-| 13 | `browser_navigate` | Browser API | Cloud browser navigation |
-| 14 | `browser_interact` | Browser API | Multi-step browser automation |
-| 15 | `proxy_request` | Proxy | Request via residential proxy |
-| 16 | `list_datasets` | Utility | List all available scraper datasets |
-| 17 | `scrape_as_markdown` | Web Unlocker | Scrape URL → clean markdown |
+| 6 | `scrape_any` | Scrapers | Universal scraper — pick any of 250+ datasets |
+| 7 | `linkedin_jobs_by_url` | LinkedIn Jobs | Scrape single job posting |
+| 8 | `linkedin_jobs_search` | LinkedIn Jobs | Search jobs by keyword+location |
+| 9 | `linkedin_profile` | LinkedIn | Scrape person profile |
+| 10 | `linkedin_company` | LinkedIn | Scrape company page |
+| 11 | `serp_search` | SERP API | Google/Bing/Yandex search |
+| 12 | `web_unlock` | Web Unlocker | Unblock any webpage |
+| 13 | `web_unlock_with_instructions` | Web Unlocker | Unblock with custom actions |
+| 14 | `scrape_as_markdown` | Web Unlocker | Scrape URL → clean markdown |
+| 15 | `list_datasets` | Utility | List all available scraper datasets |
+| 16 | `search_datasets` | Utility | Search dataset catalog by name |
+
+> **Intentionally excluded:** Browser API (Scraping Browser) and Proxy Infrastructure — these are separate paid products, not covered by the free credits.
 
 ## 💬 Usage Examples
 
@@ -72,18 +77,20 @@ Add to your MCP client config:
 | *"Scrape this webpage as markdown: example.com"* | `scrape_as_markdown("https://...")` |
 | *"Unlock this blocked page: example.com"* | `web_unlock("https://...")` |
 | *"Discover LinkedIn profiles for 'Android Architect'"* | `scraper_discover("gd_l1viktl72bvl7bjuj0", "Android Architect")` |
-| *"Scrape this Amazon product: amazon.com/dp/B08"* | `scraper_scrape_sync("gd_l4e8uuj844u8hh", "https://...")` |
+| *"Scrape this Amazon product: amazon.com/dp/B08"* | `web_data_amazon_product("https://...")` |
 
 ## 📦 Products Covered
 
-| Product | API Endpoint | Pricing |
-|---------|-------------|---------|
-| Scrapers / Datasets | `api.brightdata.com/datasets/v3/scrape` | $1.5–$5/1k records |
-| SERP API | `api.brightdata.com/request` | Pay-as-you-go |
-| Web Unlocker | `api.brightdata.com/request` | Pay-as-you-go |
-| Browser API | `api.brightdata.com/request` | Pay-as-you-go |
-| Proxy Infrastructure | `brd.superproxy.io:22225` | Pay-as-you-go |
-| Discover API | `api.brightdata.com/datasets/v3/discover` | Included with scrapers |
+| Product | Free Credits? |
+|---------|---------------|
+| Web Scraper / Datasets (LinkedIn, Amazon, etc.) | ✅ Yes |
+| SERP API (Google/Bing/Yandex) | ✅ Yes |
+| Web Unlocker API (any URL) | ✅ Yes |
+| Discover API | ✅ Yes (included) |
+| Browser API (Scraping Browser) | ❌ Separate paid product |
+| Proxy Infrastructure | ❌ Separate paid product |
+| LLM Insights (ChatGPT/Grok/Perplexity) | ❌ Separate paid product |
+| npm/PyPI package data | ❌ Separate paid product |
 
 > **Note:** 5,000 free credits/month are shared across Web Unlocker, SERP, Web Scraper, and Scraper Studio.
 
@@ -96,12 +103,9 @@ Add to your MCP client config:
 3. Select this repository
 4. Zeabur will auto-detect the `Dockerfile` and build
 5. Set environment variables in Zeabur dashboard:
-   - `BRIGHTDATA_API_TOKEN`
-   - `SERP_ZONE`
-   - `WEB_UNLOCKER_ZONE`
-   - `BROWSER_ZONE`
-   - `BRIGHTDATA_CUSTOMER_ID`
-   - `BRIGHTDATA_PROXY_PASSWORD`
+   - `BRIGHTDATA_API_TOKEN` (required)
+   - `SERP_ZONE` (required — e.g. `serp_api1`)
+   - `WEB_UNLOCKER_ZONE` (required — e.g. `unlocker`)
 6. Deploy
 
 ### Option B: Zeabur CLI
