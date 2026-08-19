@@ -42,42 +42,50 @@ Add to your MCP client config:
 }
 ```
 
-## 🛠️ Available Tools (16)
+## 🛠️ Available Tools (9)
 
-All tools below consume the **5,000 free credits / month** shared across Web Scraper, SERP API, Web Unlocker, and Scraper Studio. **No extra purchases required.**
+All tools consume the **5,000 free credits / month** shared pool (Web Scraper + SERP + Web Unlocker). **No paid add-ons.**
 
-| # | Tool | Product | Description |
-|---|------|---------|-------------|
-| 1 | `scraper_scrape_sync` | Scrapers | Single URL sync scrape |
-| 2 | `scraper_scrape_batch` | Scrapers | Multiple URLs sync batch |
-| 3 | `scraper_trigger_async` | Scrapers | Trigger async job (1000s of URLs) |
-| 4 | `scraper_get_snapshot` | Scrapers | Poll async job results |
-| 5 | `scraper_discover` | Discover API | Find records by keyword |
-| 6 | `scrape_any` | Scrapers | Universal scraper — pick any of 250+ datasets |
-| 7 | `linkedin_jobs_by_url` | LinkedIn Jobs | Scrape single job posting |
-| 8 | `linkedin_jobs_search` | LinkedIn Jobs | Search jobs by keyword+location |
-| 9 | `linkedin_profile` | LinkedIn | Scrape person profile |
-| 10 | `linkedin_company` | LinkedIn | Scrape company page |
-| 11 | `serp_search` | SERP API | Google/Bing/Yandex search |
-| 12 | `web_unlock` | Web Unlocker | Unblock any webpage |
-| 13 | `web_unlock_with_instructions` | Web Unlocker | Unblock with custom actions |
-| 14 | `scrape_as_markdown` | Web Unlocker | Scrape URL → clean markdown |
-| 15 | `list_datasets` | Utility | List all available scraper datasets |
-| 16 | `search_datasets` | Utility | Search dataset catalog by name |
+| # | Tool | What it does |
+|---|------|-------------|
+| 1 | `search_engine` | Google / Bing / Yandex structured SERP |
+| 2 | `search_engine_batch` | Up to 10 search queries in parallel |
+| 3 | `scrape_as_markdown` | Any URL → clean markdown (bypasses anti-bot/CAPTCHA) |
+| 4 | `scrape_as_html` | Any URL → raw HTML |
+| 5 | `scrape_batch` | Up to 10 URLs in parallel → markdown |
+| 6 | `discover` | AI-relevance-ranked dataset discovery |
+| 7 | `scrape` | **Generic Web Scraper — works for any platform** (LinkedIn, Amazon, Instagram, TikTok, X, YouTube, Reddit, Crunchbase, etc.) |
+| 8 | `scrape_poll` | Poll an async scrape job until ready |
+| 9 | `list_datasets` | List available datasets (cached 1h) |
 
-> **Intentionally excluded:** Browser API (Scraping Browser) and Proxy Infrastructure — these are separate paid products, not covered by the free credits.
+### The `scrape` tool replaces ~21 convenience wrappers
+
+Use the generic `scrape` tool for any platform-specific data. Pass the dataset as a friendly name:
+
+| Want | Call |
+|---|---|
+| LinkedIn profile | `scrape(dataset="linkedin_profile", urls=["https://linkedin.com/in/satyanadella"])` |
+| LinkedIn jobs | `scrape(dataset="linkedin_jobs", urls=["https://www.linkedin.com/jobs/search/?keywords=android"])` |
+| Amazon product | `scrape(dataset="amazon_product", urls=["https://www.amazon.com/dp/B08..."])` |
+| Instagram profile | `scrape(dataset="instagram_profile", urls=["https://instagram.com/..."])` |
+| TikTok posts | `scrape(dataset="tiktok_posts", urls=["https://tiktok.com/@user"])` |
+| Reddit posts | `scrape(dataset="reddit_posts", urls=["https://reddit.com/r/..."])` |
+
+Aliases also work: `"amazon"`, `"linkedin"`, `"insta"`, `"tt"`, `"x"`, etc. See `list_datasets()` for the full catalog.
+
+> **Intentionally excluded** (paid add-ons, not in the free pool): Browser Automation, LLM Insights (ChatGPT/Grok/Perplexity), npm/PyPI package data.
 
 ## 💬 Usage Examples
 
 | You say... | MCP tool called |
 |------------|----------------|
-| *"Search LinkedIn for Lead Android Developer jobs in Pune"* | `linkedin_jobs_search("Lead Android Developer", "Pune")` |
-| *"Scrape this LinkedIn job: linkedin.com/jobs/view/123"* | `linkedin_jobs_by_url("https://...")` |
-| *"Google search for Android Architect jobs India"* | `serp_search("Android Architect jobs India")` |
-| *"Scrape this webpage as markdown: example.com"* | `scrape_as_markdown("https://...")` |
-| *"Unlock this blocked page: example.com"* | `web_unlock("https://...")` |
-| *"Discover LinkedIn profiles for 'Android Architect'"* | `scraper_discover("gd_l1viktl72bvl7bjuj0", "Android Architect")` |
-| *"Scrape this Amazon product: amazon.com/dp/B08"* | `web_data_amazon_product("https://...")` |
+| *"Search LinkedIn for Lead Android Developer jobs in Pune"* | `scrape(dataset="linkedin_jobs", urls=["https://www.linkedin.com/jobs/search/?keywords=Lead+Android+Developer&location=Pune"])` |
+| *"Scrape this LinkedIn job: linkedin.com/jobs/view/123"* | `scrape(dataset="linkedin_jobs", urls=["https://linkedin.com/jobs/view/123"])` |
+| *"Google search for Android Architect jobs India"* | `search_engine(query="Android Architect jobs India")` |
+| *"Scrape this webpage as markdown: example.com"* | `scrape_as_markdown(url="https://example.com")` |
+| *"Unlock this blocked page: example.com"* | `scrape_as_markdown(url="https://example.com")` |
+| *"Discover LinkedIn profiles for 'Android Architect'"* | `discover(query="Android Architect", dataset="linkedin_profile")` |
+| *"Scrape this Amazon product: amazon.com/dp/B08"* | `scrape(dataset="amazon_product", urls=["https://www.amazon.com/dp/B08..."])` |
 
 ## 📦 Products Covered
 
