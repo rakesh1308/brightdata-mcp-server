@@ -11,6 +11,12 @@ free pool (per https://docs.brightdata.com/general/account/billing-and-pricing/f
 Browser API, LLM Insights, and Code datasets are NOT included — they require
 separate paid add-ons and do not draw from the free pool.
 
+Authentication:
+  Uses your Bright Data **API key** (NOT a token, NOT prefixed with brd_).
+  Generate it at https://brightdata.com/cp/setting/users → "Add API key".
+  Pass it as the BRIGHTDATA_API_KEY env var. The legacy BRIGHTDATA_API_TOKEN
+  env var still works as a fallback alias.
+
 Billing:
   • 5,000 free credits / month, renews on the 1st
   • Web Scraper: 1 credit / record returned
@@ -55,7 +61,7 @@ except ImportError as e:
 load_dotenv()
 
 # ─── Configuration ───────────────────────────────────────────────
-API_TOKEN = os.getenv("BRIGHTDATA_API_TOKEN", "YOUR_API_KEY")
+API_TOKEN = os.getenv("BRIGHTDATA_API_KEY") or os.getenv("BRIGHTDATA_API_TOKEN", "YOUR_API_KEY")
 BASE_URL = "https://api.brightdata.com"
 DATASETS_SCRAPE = f"{BASE_URL}/datasets/v3/scrape"
 DATASETS_TRIGGER = f"{BASE_URL}/datasets/v3/trigger"
@@ -196,7 +202,9 @@ def root(request):
         "billing": "Free 5,000 credits/month pool: Web Scraper + SERP + Web Unlocker. "
                    "After pool empty, draws from your prepaid wallet at $1.50/1k records. "
                    "No surprise bills.",
-        "tool_count": 24,
+        "auth_env_var": "BRIGHTDATA_API_KEY",
+        "auth_legacy_alias": "BRIGHTDATA_API_TOKEN",
+        "tool_count": 30,
     })
 
 

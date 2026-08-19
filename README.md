@@ -16,10 +16,10 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env and add your Bright Data API token
+# Edit .env and add your Bright Data API key (as BRIGHTDATA_API_KEY)
 ```
 
-Get your API token: [Bright Data Dashboard → Settings → API](https://brightdata.com/cp/settings/api)
+Get your API key: [Bright Data Dashboard → Account Settings → API keys](https://brightdata.com/cp/setting/users) → click **"Add API key"**. The key is shown **once** — copy it immediately. It's a long opaque string with no `brd_` prefix (that prefix is only used by proxy-protocol usernames).
 
 ### 3. Run locally
 
@@ -103,9 +103,9 @@ All tools below consume the **5,000 free credits / month** shared across Web Scr
 3. Select this repository
 4. Zeabur will auto-detect the `Dockerfile` and build
 5. Set environment variables in Zeabur dashboard:
-   - `BRIGHTDATA_API_TOKEN` (required)
+   - `BRIGHTDATA_API_KEY` (required — your Bright Data API key from `/cp/setting/users`)
    - `SERP_ZONE` (required — e.g. `serp_api1`)
-   - `WEB_UNLOCKER_ZONE` (required — e.g. `unlocker`)
+   - `WEB_UNLOCKER_ZONE` (required — e.g. `mcp_unlocker`)
 6. Deploy
 
 ### Option B: Zeabur CLI

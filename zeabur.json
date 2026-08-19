@@ -1,21 +1,25 @@
 {
   "$schema": "https://zeabur.com/schema.json",
   "name": "brightdata-mcp",
-  "description": "Custom Bright Data MCP server with 16 tools (Web Scraper/Datasets, SERP, Web Unlocker, Discover). Only products covered by the 5,000 free credits / month — no Browser API or Proxy infrastructure (those are separate paid products). Exposed over HTTP for remote MCP clients.",
+  "description": "Custom Bright Data MCP server with 30 tools (Web Scraper/Datasets, SERP, Web Unlocker, Discover). All tools consume the 5,000 free credits / month pool — no Browser API or Proxy infrastructure (those are separate paid products). Exposed over HTTP for remote MCP clients.",
   "template": "docker",
   "spec": {
     "port": 8080,
     "env": {
-      "BRIGHTDATA_API_TOKEN": {
+      "BRIGHTDATA_API_KEY": {
         "default": "",
         "required": true
+      },
+      "BRIGHTDATA_API_TOKEN": {
+        "default": "",
+        "required": false
       },
       "SERP_ZONE": {
         "default": "serp_api1",
         "required": true
       },
       "WEB_UNLOCKER_ZONE": {
-        "default": "unlocker",
+        "default": "mcp_unlocker",
         "required": true
       },
       "MCP_TRANSPORT": {
