@@ -96,21 +96,49 @@ headers = {
 # against the live catalog (cached 1h), so the fragments just need to be
 # specific enough to pick the right dataset.
 DATASET_ALIASES = {
-    "linkedin":   "linkedin people profiles",
+    # ── LinkedIn ──────────────────────────────────────────────
+    "linkedin":         "linkedin people profiles",
+    "linkedin_profile": "linkedin people profiles",
+    "linkedin_jobs":    "linkedin job listings",
+    "linkedin_company": "linkedin company information",
+
+    # ── Amazon ────────────────────────────────────────────────
     "amazon":     "amazon products",
     "amzn":       "amazon products",
+    "amazon_product":        "amazon products",
+    "amazon_product_reviews": "amazon products - reviews",
+    "amazon_product_search":  "amazon products - search",
+
+    # ── Instagram / TikTok / Facebook ─────────────────────────
     "insta":      "instagram - profiles",
     "ig":         "instagram - profiles",
+    "instagram":  "instagram - profiles",
     "tt":         "tiktok - posts by profile",
     "tiktok":     "tiktok - profiles",
-    "yt":         "youtube - videos posts",
+    "tiktok_posts": "tiktok - posts by profile",
+    "fb":         "facebook - posts by post url",
+    "facebook":   "facebook - posts by post url",
+
+    # ── X / Twitter / YouTube / Reddit ────────────────────────
     "twitter":    "x (formerly twitter) - posts",
     "x":          "x (formerly twitter) - posts",
-    "fb":         "facebook - posts by post url",
-    "crunchbase": "crunchbase companies information",
+    "x_posts":    "x (formerly twitter) - posts",
+    "yt":         "youtube - videos posts",
+    "youtube":    "youtube - videos posts",
     "reddit":     "reddit- posts",
+    "reddit_posts": "reddit- posts",
+
+    # ── Business ──────────────────────────────────────────────
+    "crunchbase":     "crunchbase companies information",
+    "crunchbase_company": "crunchbase companies information",
+
+    # ── Other ─────────────────────────────────────────────────
     "google":     "google shopping",
     "maps":       "google maps businesses",
+    "walmart":    "walmart - products",
+    "ebay":       "ebay - products",
+    "etsy":       "etsy - products",
+    "bestbuy":    "best buy - products",
 }
 
 
@@ -179,8 +207,43 @@ def resolve_dataset(name: str) -> str:
     raise ValueError(
         f"Unknown dataset: '{name}'. Could not find '{target}' in the live catalog. "
         f"Sample of available names: {sample}. "
-        f"Try list_datasets() to see all {len(catalog)} available datasets."
+        f"Try list_datasets() to see all {len(catalog)} available datasets. "
+        f"Or pass a bare dataset_id starting with 'gd_'."
     )
+
+
+def _coerce_to_list(value) -> list:
+    """
+    Coerce various input shapes to a list of strings. Handles:
+      - None    → []
+      - str     → [str]   (also parses JSON arrays and comma-separated lists)
+      - list/tuple → [str(x) for x in value]
+    This makes MCP tool parameters robust to clients that send single
+    strings instead of single-element lists.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        v = value.strip()
+        if not v:
+            return []
+        # JSON array?
+        if v.startswith("[") and v.endswith("]"):
+            try:
+                import json as _json
+                parsed = _json.loads(v)
+                if isinstance(parsed, list):
+                    return [str(x) for x in parsed if x is not None]
+            except Exception:
+                pass
+        # Comma-separated?
+        if "," in v and "\n" not in v:
+            return [s.strip() for s in v.split(",") if s.strip()]
+        # Single string
+        return [v]
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value if x is not None]
+    return [str(value)]
 
 
 # ─── Initialize MCP Server ───────────────────────────────────────
@@ -327,11 +390,13 @@ def search_engine_batch(
 ) -> dict:
     """
     Run up to 10 search queries in parallel. Cost: 1 credit / query.
+    Accepts either a list of strings or a single comma-separated string.
     """
-    if len(queries) > 10:
+    qs = _coerce_to_list(queries)
+    if len(qs) > 10:
         raise ValueError("Max 10 queries per batch")
     results = []
-    for q in queries:
+    for q in qs:
         try:
             engines = {
                 "google": f"https://www.google.com/search?q={requests.utils.quote(q)}&hl={language}&gl={country}",
@@ -375,11 +440,13 @@ def scrape_as_html(url: str) -> str:
 def scrape_batch(urls: list) -> dict:
     """
     Fetch up to 10 URLs in parallel → markdown. Cost: 1 credit / URL.
+    Accepts either a list of strings or a single comma-separated string.
     """
-    if len(urls) > 10:
+    url_list = _coerce_to_list(urls)
+    if len(url_list) > 10:
         raise ValueError("Max 10 URLs per batch")
     results = []
-    for u in urls:
+    for u in url_list:
         try:
             payload = {"zone": UNLOCKER_ZONE, "url": u, "format": "raw"}
             r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
@@ -453,15 +520,26 @@ def scrape(
     Generic Web Scraper entrypoint — any dataset, any URLs.
     Cost: 1 credit / record returned.
 
-    sync:  {"dataset_id": "...", "results": [...]}
-    async: {"dataset_id": "...", "snapshot_id": "..."}
+    Args:
+        dataset: Friendly name or bare gd_* id. Resolved against live catalog.
+        urls: List of URLs (or a single string, or comma-separated string).
+              Max 20 URLs for sync, thousands for async.
+        async_mode: True returns snapshot_id (poll with scrape_poll).
+        output_format: "json", "ndjson", or "csv".
+
+    Returns:
+        sync:  {"dataset_id": "...", "results": [...]}
+        async: {"dataset_id": "...", "snapshot_id": "..."}
     """
     real_id = resolve_dataset(dataset)
+    url_list = _coerce_to_list(urls)
+    if not url_list:
+        return {"error": "No URLs provided. Pass a list, single string, or comma-separated string."}
     endpoint = DATASETS_TRIGGER if async_mode else DATASETS_SCRAPE
     timeout = 60 if async_mode else 120
     response = requests.post(
         f"{endpoint}?dataset_id={real_id}&format={output_format}",
-        headers=headers, json=[{"url": u} for u in urls], timeout=timeout,
+        headers=headers, json=[{"url": u} for u in url_list], timeout=timeout,
     )
     response.raise_for_status()
     data = response.json()
