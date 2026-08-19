@@ -122,6 +122,12 @@ DATASET_IDS = {
 
     # ── Business ────────────────────────────────────────────────
     "crunchbase_company":     "gd_l1vijqt9jfj7olije",
+
+    # ── Search engines (for the discover() API) ─────────────────
+    # Google SERP 100 dataset — used by discover() when dataset="google_search"
+    "google_search":          "gd_mfz5x93lmsjjjylob",
+    "bing_search":            "gd_mfz5x93lmsjjjylob",  # same dataset engine-specific
+    "yandex_search":          "gd_mfz5x93lmsjjjylob",
 }
 
 # Allow runtime override
@@ -144,6 +150,10 @@ DATASET_ALIASES = {
     "x":          "x_posts",
     "fb":         "facebook_posts",
     "crunchbase": "crunchbase_company",
+    "google":     "google_search",
+    "serp":       "google_search",
+    "bing":       "bing_search",
+    "yandex":     "yandex_search",
 }
 
 
@@ -255,6 +265,10 @@ def search_engine(
     """
     Search Google, Bing, or Yandex — structured SERP results.
     Cost: 1 credit / call.
+
+    Robust fallback: tries parsed_light JSON first; if that fails (zone issue
+    or empty body), automatically falls back to markdown format. Returns
+    markdown wrapped in a dict in that case.
     """
     engines = {
         "google": f"https://www.google.com/search?q={requests.utils.quote(query)}&hl={language}&gl={country}",
@@ -262,15 +276,35 @@ def search_engine(
         "yandex": f"https://yandex.com/search/?text={requests.utils.quote(query)}&lr={country}",
     }
     url = engines.get(engine, engines["google"])
-    payload = {
-        "zone": SERP_ZONE,
-        "url": url,
-        "format": "raw",
-        "data_format": "parsed_light" if output_format == "json" else "markdown",
-    }
-    response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
-    return response.json() if output_format == "json" else {"markdown": response.text}
+
+    if output_format == "markdown":
+        payload = {"zone": SERP_ZONE, "url": url, "format": "raw", "data_format": "markdown"}
+        r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
+        r.raise_for_status()
+        return {"markdown": r.text}
+
+    # JSON path — try parsed_light, fall back to markdown on failure
+    payload = {"zone": SERP_ZONE, "url": url, "format": "raw", "data_format": "parsed_light"}
+    r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
+
+    if r.status_code >= 400:
+        return {
+            "error": f"SERP API returned HTTP {r.status_code}",
+            "body": r.text[:500],
+            "hint": "Check that SERP_ZONE exists in your dashboard (https://brightdata.com/cp/zones).",
+        }
+
+    # Try JSON parse; if it fails, fall back to markdown
+    try:
+        return r.json()
+    except ValueError:
+        payload_md = {"zone": SERP_ZONE, "url": url, "format": "raw", "data_format": "markdown"}
+        r2 = requests.post(REQUEST_URL, headers=headers, json=payload_md, timeout=60)
+        r2.raise_for_status()
+        return {
+            "markdown": r2.text,
+            "note": "JSON parse failed for parsed_light; fell back to markdown.",
+        }
 
 
 @mcp.tool()
