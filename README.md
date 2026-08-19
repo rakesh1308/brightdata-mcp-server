@@ -112,8 +112,8 @@ Aliases also work: `"amazon"`, `"linkedin"`, `"insta"`, `"tt"`, `"x"`, etc. See 
 4. Zeabur will auto-detect the `Dockerfile` and build
 5. Set environment variables in Zeabur dashboard:
    - `BRIGHTDATA_API_KEY` (required — your Bright Data API key from `/cp/setting/users`)
-   - `SERP_ZONE` (required — e.g. `serp_api1`)
-   - `WEB_UNLOCKER_ZONE` (required — e.g. `mcp_unlocker`)
+   - `SERP_ZONE` (required — e.g. `serp_api`, must match a SERP API zone in your dashboard)
+   - `WEB_UNLOCKER_ZONE` (required — e.g. `mcp_unlocker`, must match a Web Unlocker zone)
 6. Deploy
 
 ### Option B: Zeabur CLI

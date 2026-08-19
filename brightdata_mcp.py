@@ -69,8 +69,8 @@ DATASETS_SNAPSHOT = f"{BASE_URL}/datasets/v3/snapshot"
 DATASETS_DISCOVER = f"{BASE_URL}/datasets/v3/discover"
 REQUEST_URL = f"{BASE_URL}/request"  # SERP + Web Unlocker
 
-SERP_ZONE = os.getenv("SERP_ZONE", "serp_api1")
-UNLOCKER_ZONE = os.getenv("WEB_UNLOCKER_ZONE", "unlocker")
+SERP_ZONE = os.getenv("SERP_ZONE", "serp_api")
+UNLOCKER_ZONE = os.getenv("WEB_UNLOCKER_ZONE", "mcp_unlocker")
 
 headers = {
     "Authorization": f"Bearer {API_TOKEN}",
@@ -382,7 +382,7 @@ def scrape_batch(urls: list) -> dict:
 @mcp.tool()
 def discover(
     query: str,
-    dataset: str = "google_search",
+    dataset: str = "linkedin_jobs",
     intent: str = None,
     start_date: str = None,
     end_date: str = None,
@@ -392,9 +392,18 @@ def discover(
     AI-relevance-ranked discovery across Bright Data datasets. Use for research.
     Cost: 1 credit / record.
 
+    NOTE: Only some datasets support the Discover API (where you supply a query
+    instead of URLs). Verified working datasets include:
+      - linkedin_jobs    ("Lead Android Developer India")
+      - linkedin_profile (search by criteria)
+      - linkedin_company
+      - crunchbase_company
+    The google_search dataset (SERP) does NOT support discover — use
+    search_engine() instead for Google queries.
+
     Args:
         query: Natural-language query.
-        dataset: Dataset to discover from.
+        dataset: Dataset to discover from. Default "linkedin_jobs".
         intent: Optional AI intent hint.
         start_date / end_date: Optional ISO date filters.
         limit: Max records (default 50).
@@ -411,6 +420,13 @@ def discover(
         f"{DATASETS_DISCOVER}?dataset_id={real_id}&format=json",
         headers=headers, json=payload, timeout=120,
     )
+    if response.status_code == 404:
+        return {
+            "error": f"Dataset '{dataset}' (id: {real_id}) does not support the Discover API.",
+            "hint": "Use a discovery-enabled dataset like 'linkedin_jobs', 'linkedin_profile', "
+                    "'linkedin_company', or 'crunchbase_company'. For Google search, use "
+                    "the search_engine() tool instead.",
+        }
     response.raise_for_status()
     return response.json()
 
@@ -447,9 +463,21 @@ def scrape(
 def scrape_poll(snapshot_id: str, max_wait_seconds: int = 300) -> dict:
     """
     Poll an async scrape job until ready. Polling is free.
+
+    Args:
+        snapshot_id: ID returned by scrape(..., async_mode=True).
+        max_wait_seconds: Max wait (default 5 min).
+
+    Returns:
+        {"status": "ready", ...} on success,
+        {"status": "failed", ...} on failure,
+        {"error": "Timeout after Ns — still processing"} if still running,
+        {"error": "Snapshot not found", "snapshot_id": "..."} if 404.
     """
     for _ in range(max_wait_seconds // 5):
         r = requests.get(f"{DATASETS_SNAPSHOT}/{snapshot_id}", headers=headers, timeout=30)
+        if r.status_code == 404:
+            return {"error": "Snapshot not found", "snapshot_id": snapshot_id}
         r.raise_for_status()
         data = r.json()
         if data.get("status") == "ready":

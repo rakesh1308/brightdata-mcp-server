@@ -15,7 +15,7 @@
         "required": false
       },
       "SERP_ZONE": {
-        "default": "serp_api1",
+        "default": "serp_api",
         "required": true
       },
       "WEB_UNLOCKER_ZONE": {
