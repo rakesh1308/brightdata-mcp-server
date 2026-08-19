@@ -77,98 +77,109 @@ headers = {
     "Content-Type": "application/json",
 }
 
-# ─── Dataset IDs ─────────────────────────────────────────────────
-# Verified IDs from Bright Data's official MCP server (brightdata/brightdata-mcp).
-# 1 credit per record returned. Override any via env var: DATASET_<KEY>=gd_xxx
+# ─── Dataset Registry ──────────────────────────────────────────
+# Strategy: NO hardcoded dataset IDs. Bright Data's catalog changes over
+# time; any hardcoded ID may become stale. We saw this firsthand — the
+# Amazon dataset ID changed from gd_l7q7dkf244hwjntr0w (old) to
+# gd_l7q7dkf244hwjntr0 (current) — a 1-character difference that broke
+# scrapes.
+#
+# Instead:
+#   1. Bare dataset_ids starting with "gd_" are passed through as-is
+#      (always works — call list_datasets() to discover what's available)
+#   2. Friendly names are resolved by lazy-fetching from the live catalog
+#      (cached 1h via list_datasets()) and fuzzy-matching by name
+#   3. A few common aliases (linkedin, amazon, etc.) shortcut the friendly name
 
-DATASET_IDS = {
-    # ── LinkedIn ────────────────────────────────────────────────
-    "linkedin_profile":       "gd_l1viktl72bvl7bjuj0",
-    "linkedin_company":       "gd_l1vikfnt1wgvvqz95w",
-    "linkedin_jobs":          "gd_lpfll7v5hcqtkxl6l",
-    "linkedin_posts":         "gd_lph3lh2u1qi4xyt",
-    "linkedin_people_search": "gd_l1vikot4r4x7peexsd",
-
-    # ── Amazon ──────────────────────────────────────────────────
-    "amazon_product":         "gd_l7q7dkf244hwjntr0w",
-    "amazon_product_reviews": "gd_l7q7dkf244hwjntr0w",
-    "amazon_product_search":  "gd_l7q7dkf244hwjntr0w",
-
-    # ── Walmart / eBay / Best Buy / Etsy ────────────────────────
-    "walmart_product":        "gd_l95alt7ie3g3cvjbm9",
-    "ebay_product":           "gd_ltarxiv6i2ptg3l42r",
-    "bestbuy_products":       "gd_ltre1c8a3g4qjru8r2",
-    "etsy_products":          "gd_ltppk0d1pd2c1j8w06",
-
-    # ── Instagram ───────────────────────────────────────────────
-    "instagram_profile":      "gd_l1vikfch901nx3by4",
-    "instagram_posts":        "gd_l1vikfch901nx3by4",
-
-    # ── TikTok ──────────────────────────────────────────────────
-    "tiktok_profile":         "gd_l1v12kd5g2kh1ied1h",
-    "tiktok_posts":           "gd_l1v1b40scg1cm0bj0f",
-
-    # ── Facebook ────────────────────────────────────────────────
-    "facebook_posts":         "gd_l1vikfch901nx3by4",
-
-    # ── X / Twitter ─────────────────────────────────────────────
-    "x_posts":                "gd_lwxrmxw2i2ptw8w5w1",
-
-    # ── YouTube ─────────────────────────────────────────────────
-    "youtube_videos":         "gd_l7q7dkf244hwjntr0w",
-
-    # ── Reddit ──────────────────────────────────────────────────
-    "reddit_posts":           "gd_l7q7dkf244hwjntr0w",
-
-    # ── Business ────────────────────────────────────────────────
-    "crunchbase_company":     "gd_l1vijqt9jfj7olije",
-
-    # ── Search engines (for the discover() API) ─────────────────
-    # Google SERP 100 dataset — used by discover() when dataset="google_search"
-    "google_search":          "gd_mfz5x93lmsjjjylob",
-    "bing_search":            "gd_mfz5x93lmsjjjylob",  # same dataset engine-specific
-    "yandex_search":          "gd_mfz5x93lmsjjjylob",
-}
-
-# Allow runtime override
-for k in list(DATASET_IDS):
-    env_key = f"DATASET_{k.upper()}"
-    if os.getenv(env_key):
-        DATASET_IDS[k] = os.getenv(env_key)
-
-# Short aliases
+# Short aliases only — these map to substring-matchable fragments of
+# catalog names. resolve_dataset() does a case-insensitive substring match
+# against the live catalog (cached 1h), so the fragments just need to be
+# specific enough to pick the right dataset.
 DATASET_ALIASES = {
-    "linkedin":   "linkedin_profile",
-    "amazon":     "amazon_product",
-    "amzn":       "amazon_product",
-    "insta":      "instagram_profile",
-    "ig":         "instagram_profile",
-    "tt":         "tiktok_posts",
-    "tiktok":     "tiktok_posts",
-    "yt":         "youtube_videos",
-    "twitter":    "x_posts",
-    "x":          "x_posts",
-    "fb":         "facebook_posts",
-    "crunchbase": "crunchbase_company",
-    "google":     "google_search",
-    "serp":       "google_search",
-    "bing":       "bing_search",
-    "yandex":     "yandex_search",
+    "linkedin":   "linkedin people profiles",
+    "amazon":     "amazon products",
+    "amzn":       "amazon products",
+    "insta":      "instagram - profiles",
+    "ig":         "instagram - profiles",
+    "tt":         "tiktok - posts by profile",
+    "tiktok":     "tiktok - profiles",
+    "yt":         "youtube - videos posts",
+    "twitter":    "x (formerly twitter) - posts",
+    "x":          "x (formerly twitter) - posts",
+    "fb":         "facebook - posts by post url",
+    "crunchbase": "crunchbase companies information",
+    "reddit":     "reddit- posts",
+    "google":     "google shopping",
+    "maps":       "google maps businesses",
 }
+
+
+def _get_catalog(force_refresh: bool = False) -> list:
+    """Return the live dataset catalog (cached 1h). Each entry: {id, name, ...}"""
+    now = time.time()
+    cached_data = _DATASET_CATALOG_CACHE.get("data")
+    fetched_at = _DATASET_CATALOG_CACHE.get("fetched_at", 0)
+    if not force_refresh and cached_data and (now - fetched_at) < _CATALOG_TTL_SECONDS:
+        return cached_data.get("datasets", [])
+    # Fetch live
+    for url in ("https://api.brightdata.com/datasets/list",
+                "https://api.brightdata.com/datasets/v3/list"):
+        try:
+            r = requests.get(url, headers=headers, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                datasets = data if isinstance(data, list) else data.get("datasets", [])
+                if datasets:
+                    _DATASET_CATALOG_CACHE["data"] = {"datasets": datasets}
+                    _DATASET_CATALOG_CACHE["fetched_at"] = now
+                    return datasets
+        except Exception:
+            continue
+    return cached_data.get("datasets", []) if cached_data else []
 
 
 def resolve_dataset(name: str) -> str:
-    """Resolve friendly name / alias / bare dataset_id → real dataset_id."""
+    """
+    Resolve a friendly name / alias / bare dataset_id → real dataset_id.
+
+    Strategy:
+      - Bare id starting with 'gd_': passed through as-is
+      - Alias from DATASET_ALIASES: expanded to a friendly name
+      - Friendly name: fuzzy-matched against the live catalog (cached 1h)
+
+    Always works for bare ids. For friendly names, the catalog must be
+    populated — either via a prior list_datasets() call or by lazy fetch.
+    """
     if not name:
         raise ValueError("Empty dataset name")
+    # Bare dataset_id — always works
     if name.startswith("gd_"):
         return name
-    name = DATASET_ALIASES.get(name.lower(), name.lower())
-    if name in DATASET_IDS:
-        return DATASET_IDS[name]
+    # Alias → friendly name
+    target = DATASET_ALIASES.get(name.lower(), name.lower())
+    # Lazy-fetch the live catalog
+    catalog = _get_catalog()
+    if not catalog:
+        raise ValueError(
+            f"Cannot resolve '{name}': dataset catalog unavailable. "
+            f"Either pass a bare dataset_id starting with 'gd_', or call "
+            f"list_datasets() first to populate the cache."
+        )
+    # Exact match (case-insensitive)
+    for ds in catalog:
+        if ds.get("name", "").lower() == target.lower():
+            return ds["id"]
+    # Substring match — pick the shortest name (most specific)
+    matches = [ds for ds in catalog if target.lower() in ds.get("name", "").lower()]
+    if matches:
+        matches.sort(key=lambda d: len(d.get("name", "")))
+        return matches[0]["id"]
+    # Nothing matched
+    sample = ", ".join(ds.get("name", "") for ds in catalog[:5])
     raise ValueError(
-        f"Unknown dataset: '{name}'. Known: {', '.join(sorted(DATASET_IDS))}. "
-        f"Or pass a bare dataset_id starting with 'gd_'."
+        f"Unknown dataset: '{name}'. Could not find '{target}' in the live catalog. "
+        f"Sample of available names: {sample}. "
+        f"Try list_datasets() to see all {len(catalog)} available datasets."
     )
 
 
@@ -492,6 +503,7 @@ def scrape_poll(snapshot_id: str, max_wait_seconds: int = 300) -> dict:
 def list_datasets(force_refresh: bool = False) -> dict:
     """
     List available datasets — fetches the live Bright Data catalog (cached 1h).
+    Returns ~1700+ datasets with their current IDs.
     """
     now = time.time()
     if not force_refresh and _DATASET_CATALOG_CACHE["data"] and (now - _DATASET_CATALOG_CACHE["fetched_at"]) < _CATALOG_TTL_SECONDS:
@@ -508,7 +520,6 @@ def list_datasets(force_refresh: bool = False) -> dict:
                     result = {
                         "count": len(datasets),
                         "datasets": datasets,
-                        "friendly_names": {k: v for k, v in DATASET_IDS.items()},
                         "aliases": DATASET_ALIASES,
                     }
                     _DATASET_CATALOG_CACHE["data"] = result
@@ -518,11 +529,10 @@ def list_datasets(force_refresh: bool = False) -> dict:
             continue
 
     return {
-        "count": len(DATASET_IDS),
-        "datasets": [{"id": v, "name": k} for k, v in DATASET_IDS.items()],
-        "friendly_names": {k: v for k, v in DATASET_IDS.items()},
+        "count": 0,
+        "datasets": [],
         "aliases": DATASET_ALIASES,
-        "note": "Live catalog unavailable — showing built-in only.",
+        "note": "Live catalog unavailable. Try again, or pass a bare dataset_id starting with 'gd_'.",
     }
 
 # ═════════════════════════════════════════════════════════════════
