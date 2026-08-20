@@ -1,189 +1,179 @@
-# Bright Data MCP Server (Custom)
+# Bright Data MCP Server
 
-A self-hosted MCP server wrapping Bright Data's Web Scraper API, SERP API, Web Unlocker API, and account-gated Discover API. The first three draw from Bright Data's **5,000 monthly free-credit pool** for eligible accounts; Discover requires separate enablement.
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Model Context Protocol](https://img.shields.io/badge/MCP-Streamable_HTTP-5A67D8)](https://modelcontextprotocol.io/)
+[![CI](https://github.com/rakesh1308/brightdata-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/rakesh1308/brightdata-mcp-server/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Use it from Claude Desktop, Cursor, Claude Code, or any MCP-compatible client.
+A compact, self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) server for Bright Data. It exposes nine tools for web search, anti-bot page retrieval, structured dataset scraping, asynchronous snapshot collection, and AI-ranked discovery.
 
-## 🚀 Quick Start
+The project demonstrates production-oriented API integration: live dataset resolution instead of stale IDs, validated request parameters, concurrent batch execution, async trigger/poll/download workflows, Streamable HTTP deployment, and contract-focused tests.
 
-### 1. Install dependencies
+## Architecture
 
-```bash
-pip install -r requirements.txt
+```mermaid
+flowchart LR
+    Client[MCP client] --> Server[FastMCP server]
+    Server --> SERP[SERP API]
+    Server --> Unlocker[Web Unlocker API]
+    Server --> Scrapers[Web Scraper API]
+    Server --> Discover[Discover API]
+    Scrapers --> Catalog[Live dataset catalog]
+    Scrapers --> Snapshot[Progress and snapshot APIs]
 ```
 
-### 2. Configure environment
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `search_engine` | Search Google, Bing, or Yandex as parsed JSON or Markdown |
+| `search_engine_batch` | Run up to 10 searches concurrently while preserving input order |
+| `scrape_as_markdown` | Retrieve an unlocked page using Bright Data's native Markdown conversion |
+| `scrape_as_html` | Retrieve the complete unlocked HTML response |
+| `scrape_batch` | Retrieve up to 10 pages concurrently as Markdown |
+| `discover` | Run AI-ranked public-web discovery with intent, date, locale, and keyword options |
+| `scrape` | Run any collect-by-URL Web Scraper dataset synchronously or asynchronously |
+| `scrape_poll` | Poll snapshot progress and download completed JSON, NDJSON, JSONL, or CSV results |
+| `list_datasets` | Read and cache the live dataset catalog and available dataset IDs |
+
+### Choosing the right tool
+
+- Use `search_engine` when you need broad or recent search results.
+- Use `scrape_as_markdown` when you need readable content from an arbitrary page.
+- Use `scrape` when Bright Data has a structured scraper for the target site.
+- Use `discover` for intent-ranked research. It is a separate account-gated product and is not a replacement for exhaustive vertical search.
+- For job research, search for job URLs first and then pass those URLs to the appropriate structured dataset scraper.
+
+## Quick start
+
+Requirements: Python 3.11+ and a [Bright Data API key](https://brightdata.com/cp/setting/users).
 
 ```bash
+git clone https://github.com/rakesh1308/brightdata-mcp-server.git
+cd brightdata-mcp-server
+python -m venv .venv
+```
+
+Activate the environment and install dependencies:
+
+```bash
+# macOS/Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+python -m pip install -r requirements.txt
+```
+
+Create the local configuration:
+
+```bash
+# macOS/Linux
 cp .env.example .env
-# Edit .env and add your Bright Data API key (as BRIGHTDATA_API_KEY)
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
 
-Get your API key: [Bright Data Dashboard → Account Settings → API keys](https://brightdata.com/cp/setting/users) → click **"Add API key"**. The key is shown **once** — copy it immediately. It's a long opaque string with no `brd_` prefix (that prefix is only used by proxy-protocol usernames).
+Set these values in `.env`:
 
-### 3. Run locally
+| Variable | Required | Description |
+| --- | --- | --- |
+| `BRIGHTDATA_API_KEY` | Yes | API key from Bright Data account settings |
+| `SERP_ZONE` | For search tools | Name of a configured SERP API zone |
+| `WEB_UNLOCKER_ZONE` | For page tools | Name of a configured Web Unlocker API zone |
+| `MCP_TRANSPORT` | No | `stdio`, `http`, or legacy `sse`; defaults to `stdio` locally |
+| `MCP_HOST` | No | HTTP bind host; defaults to `0.0.0.0` |
+| `MCP_PORT` | No | HTTP port; defaults to `8080` |
+| `MCP_PATH` | No | Streamable HTTP path; defaults to `/mcp` |
+
+Run locally over stdio:
 
 ```bash
 python brightdata_mcp.py
 ```
 
-### 4. Connect from Claude Desktop / Cursor
+## MCP client configuration
 
-Add to your MCP client config:
-
-```json
-{
-  "mcpServers": {
-    "brightdata-custom": {
-      "command": "python",
-      "args": ["C:/RAKESH/WORK/MCP_and_AI/MCP/bright-data-scrape/brightdata_mcp.py"]
-    }
-  }
-}
-```
-
-## 🛠️ Available Tools (9)
-
-Web Scraper, SERP, and Web Unlocker calls consume the shared **5,000 monthly free credits** on eligible accounts. `discover` uses a separate, account-gated API and returns a clear message when it is not enabled.
-
-| # | Tool | What it does |
-|---|------|-------------|
-| 1 | `search_engine` | Google / Bing / Yandex structured SERP |
-| 2 | `search_engine_batch` | Up to 10 search queries in parallel |
-| 3 | `scrape_as_markdown` | Any URL → clean markdown (bypasses anti-bot/CAPTCHA) |
-| 4 | `scrape_as_html` | Any URL → raw HTML |
-| 5 | `scrape_batch` | Up to 10 URLs in parallel → markdown |
-| 6 | `discover` | AI-ranked public-web discovery (separate enablement) |
-| 7 | `scrape` | **Generic Web Scraper — works for any platform** (LinkedIn, Amazon, Instagram, TikTok, X, YouTube, Reddit, Crunchbase, etc.) |
-| 8 | `scrape_poll` | Poll an async scrape job until ready |
-| 9 | `list_datasets` | List available datasets (cached 1h) |
-
-### The `scrape` tool replaces ~21 convenience wrappers
-
-Use the generic `scrape` tool for any platform-specific data. Pass the dataset as a friendly name:
-
-| Want | Call |
-|---|---|
-| LinkedIn profile | `scrape(dataset="linkedin_profile", urls=["https://linkedin.com/in/satyanadella"])` |
-| LinkedIn jobs | `scrape(dataset="linkedin_jobs", urls=["https://www.linkedin.com/jobs/search/?keywords=android"])` |
-| Amazon product | `scrape(dataset="amazon_product", urls=["https://www.amazon.com/dp/B08..."])` |
-| Instagram profile | `scrape(dataset="instagram_profile", urls=["https://instagram.com/..."])` |
-| TikTok posts | `scrape(dataset="tiktok_posts", urls=["https://tiktok.com/@user"])` |
-| Reddit posts | `scrape(dataset="reddit_posts", urls=["https://reddit.com/r/..."])` |
-
-Aliases also work: `"amazon"`, `"linkedin"`, `"insta"`, `"tt"`, `"x"`, etc. See `list_datasets()` for the full catalog.
-
-> **Intentionally excluded** (paid add-ons, not in the free pool): Browser Automation, LLM Insights (ChatGPT/Grok/Perplexity), npm/PyPI package data.
-
-## 💬 Usage Examples
-
-| You say... | MCP tool called |
-|------------|----------------|
-| *"Search LinkedIn for Lead Android Developer jobs in Pune"* | `scrape(dataset="linkedin_jobs", urls=["https://www.linkedin.com/jobs/search/?keywords=Lead+Android+Developer&location=Pune"])` |
-| *"Scrape this LinkedIn job: linkedin.com/jobs/view/123"* | `scrape(dataset="linkedin_jobs", urls=["https://linkedin.com/jobs/view/123"])` |
-| *"Google search for Android Architect jobs India"* | `search_engine(query="Android Architect jobs India")` |
-| *"Scrape this webpage as markdown: example.com"* | `scrape_as_markdown(url="https://example.com")` |
-| *"Unlock this blocked page: example.com"* | `scrape_as_markdown(url="https://example.com")` |
-| *"Discover recent Android architecture research"* | `discover(query="Android architecture", intent="Recent authoritative engineering articles")` |
-| *"Scrape this Amazon product: amazon.com/dp/B08"* | `scrape(dataset="amazon_product", urls=["https://www.amazon.com/dp/B08..."])` |
-
-## 📦 Products Covered
-
-| Product | Free Credits? |
-|---------|---------------|
-| Web Scraper / Datasets (LinkedIn, Amazon, etc.) | ✅ Yes |
-| SERP API (Google/Bing/Yandex) | ✅ Yes |
-| Web Unlocker API (any URL) | ✅ Yes |
-| Discover API | ⚠️ Separate account-gated product |
-| Browser API (Scraping Browser) | ❌ Not exposed by this server |
-| Proxy Infrastructure | ❌ Separate paid product |
-| LLM Insights (ChatGPT/Grok/Perplexity) | ❌ Separate paid product |
-| npm/PyPI package data | ❌ Separate paid product |
-
-> **Note:** As of August 20, 2026, 5,000 monthly free credits are shared across Web Unlocker, SERP, Web Scraper, and Scraper Studio. Bright Data documents Browser API inclusion starting September 1, 2026; this server does not expose Browser API.
-
-## 🚢 Deploy to Zeabur
-
-### Option A: One-click deploy
-
-1. Push this repo to GitHub (private repo recommended)
-2. Go to [zeabur.com](https://zeabur.com) → **New Project** → **Deploy from GitHub**
-3. Select this repository
-4. Zeabur will auto-detect the `Dockerfile` and build
-5. Set environment variables in Zeabur dashboard:
-   - `BRIGHTDATA_API_KEY` (required — your Bright Data API key from `/cp/setting/users`)
-   - `SERP_ZONE` (required — e.g. `serp_api`, must match a SERP API zone in your dashboard)
-   - `WEB_UNLOCKER_ZONE` (required — e.g. `mcp_unlocker`, must match a Web Unlocker zone)
-6. Deploy
-
-### Option B: Zeabur CLI
-
-```bash
-npm install -g @zeabur/cli
-zeabur login
-zeabur deploy
-```
-
-### MCP Transport on Zeabur
-
-This server uses **stdio** transport by default for local MCP clients. Zeabur is configured to use modern **Streamable HTTP** transport:
-
-```bash
-MCP_TRANSPORT=http python brightdata_mcp.py
-```
-
-Set the host and port with the variables used by this project:
-
-```bash
-# In Zeabur, set environment variable:
-MCP_TRANSPORT=http
-MCP_HOST=0.0.0.0
-MCP_PORT=8080
-MCP_PATH=/mcp
-```
-
-## 🔧 Client Configurations
-
-### Claude Desktop (`claude_desktop_config.json`)
+Use an absolute path to the script in your MCP client configuration:
 
 ```json
 {
   "mcpServers": {
     "brightdata-custom": {
       "command": "python",
-      "args": ["C:/path/to/brightdata_mcp.py"]
+      "args": ["/absolute/path/to/brightdata-mcp-server/brightdata_mcp.py"]
     }
   }
 }
 ```
 
-### Cursor (`.cursor/mcp.json`)
+For a remote deployment, connect the client to:
 
-```json
-{
-  "mcpServers": {
-    "brightdata-custom": {
-      "command": "python",
-      "args": ["C:/path/to/brightdata_mcp.py"]
-    }
-  }
-}
+```text
+https://your-service.example/mcp
 ```
 
-### Claude Code (CLI)
+## Dataset scraping
+
+Dataset IDs can be passed directly, but friendly aliases are resolved against Bright Data's live catalog and cached for one hour:
+
+```text
+scrape(
+  dataset="amazon_product",
+  urls=["https://www.amazon.com/dp/PRODUCT_ID"]
+)
+```
+
+Common aliases include `linkedin_profile`, `linkedin_jobs`, `linkedin_company`, `amazon_product`, `amazon_product_reviews`, `instagram_profile`, `tiktok_posts`, `reddit_posts`, and `crunchbase_company`.
+
+Synchronous requests accept up to 20 URLs. Use `async_mode=True` for larger jobs, then pass the returned snapshot ID to `scrape_poll`.
+
+## Testing
+
+The test suite verifies all nine MCP tool contracts without spending API credits:
 
 ```bash
-claude mcp add brightdata-custom python /path/to/brightdata_mcp.py
+python -m unittest -v
+python -m py_compile brightdata_mcp.py test_brightdata_mcp.py
 ```
 
-## 🔗 Documentation
+Authenticated live smoke tests were also used during development to verify SERP, Web Unlocker, Discover, dataset catalog, synchronous scraping, and the complete async snapshot lifecycle.
 
-- [Scrapers Overview](https://docs.brightdata.com/datasets/scrapers/overview)
-- [SERP API](https://docs.brightdata.com/scraping-automation/serp-api/quickstart)
-- [Web Unlocker](https://docs.brightdata.com/scraping-automation/web-unlocker)
-- [Browser API](https://docs.brightdata.com/scraping-automation/scraping-browser/introduction)
-- [Full Scraper Catalog](https://brightdata.com/cp/scrapers/browse)
+## Deploying on Zeabur
 
-## 📄 License
+The included [`Dockerfile`](Dockerfile) and [`zeabur.json`](zeabur.json) run the server over Streamable HTTP on port 8080.
 
-MIT
+1. Deploy this GitHub repository as a Docker service.
+2. Add `BRIGHTDATA_API_KEY`, `SERP_ZONE`, and `WEB_UNLOCKER_ZONE` as service secrets.
+3. Keep `MCP_TRANSPORT=http`, `MCP_HOST=0.0.0.0`, `MCP_PORT=8080`, and `MCP_PATH=/mcp`.
+4. Verify `GET /health`, then initialize an MCP client at `/mcp`.
+
+> [!IMPORTANT]
+> The server authenticates outbound Bright Data requests, but it does not authenticate inbound MCP clients. Protect an internet-facing deployment with Zeabur access controls, an authenticated reverse proxy, or another trusted gateway. Otherwise, anyone who discovers the endpoint could consume the configured Bright Data account's credits.
+
+## Security and secrets
+
+- `.env` and common credential-file variants are excluded from both Git and Docker build context.
+- Never put an API key in MCP client JSON committed to source control.
+- Store production credentials in Zeabur's secret/environment-variable settings.
+- If a key is exposed, revoke it in Bright Data immediately and replace it in every deployment.
+- See [`SECURITY.md`](SECURITY.md) for vulnerability-reporting guidance.
+
+## Billing notes
+
+Eligible Bright Data accounts receive a shared monthly free-credit allowance for Web Unlocker, SERP, Web Scraper, and Scraper Studio. Discover is a separate account-gated API. Usage and product eligibility can change, so verify the current details in the [Bright Data free-tier documentation](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier).
+
+## Official documentation
+
+- [Web Scraper API](https://docs.brightdata.com/datasets/scrapers/overview)
+- [Synchronous scraper requests](https://docs.brightdata.com/api-reference/scrapers/synchronous-requests)
+- [Asynchronous scraper requests](https://docs.brightdata.com/api-reference/rest-api/scraper/asynchronous-requests)
+- [SERP API](https://docs.brightdata.com/scraping-automation/serp-api/introduction)
+- [Web Unlocker API](https://docs.brightdata.com/scraping-automation/web-unlocker/introduction)
+- [Discover API](https://docs.brightdata.com/api-reference/discover/overview)
+
+## License
+
+Released under the [MIT License](LICENSE).

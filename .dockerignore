@@ -9,6 +9,15 @@ venv/
 .env
 .env.local
 .env.*.local
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+id_rsa
+id_ed25519
 .git
 .gitignore
 .dockerignore

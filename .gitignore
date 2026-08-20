@@ -2,6 +2,18 @@
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+
+# Credentials and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+id_rsa
+id_ed25519
 
 # Python
 __pycache__/
