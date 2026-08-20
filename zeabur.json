@@ -1,7 +1,7 @@
 {
   "$schema": "https://zeabur.com/schema.json",
   "name": "brightdata-mcp",
-  "description": "Custom Bright Data MCP server with 9 tools (search, scrape, discover). All consume the 5,000 free credits / month pool — no paid add-ons. Exposed over HTTP for remote MCP clients.",
+  "description": "Custom Bright Data MCP server with 9 tools for search, page scraping, Web Scraper datasets, and account-gated Discover. Exposed over Streamable HTTP.",
   "template": "docker",
   "spec": {
     "port": 8080,

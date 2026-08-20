@@ -1,6 +1,6 @@
-# Bright Data MCP Server (Custom, Free-Credit Only)
+# Bright Data MCP Server (Custom)
 
-A self-hosted MCP server wrapping the three Bright Data products that share the **5,000 free credits / month pool**: Web Scraper API, SERP API, and Web Unlocker API. **No paid add-ons required.**
+A self-hosted MCP server wrapping Bright Data's Web Scraper API, SERP API, Web Unlocker API, and account-gated Discover API. The first three draw from Bright Data's **5,000 monthly free-credit pool** for eligible accounts; Discover requires separate enablement.
 
 Use it from Claude Desktop, Cursor, Claude Code, or any MCP-compatible client.
 
@@ -44,7 +44,7 @@ Add to your MCP client config:
 
 ## 🛠️ Available Tools (9)
 
-All tools consume the **5,000 free credits / month** shared pool (Web Scraper + SERP + Web Unlocker). **No paid add-ons.**
+Web Scraper, SERP, and Web Unlocker calls consume the shared **5,000 monthly free credits** on eligible accounts. `discover` uses a separate, account-gated API and returns a clear message when it is not enabled.
 
 | # | Tool | What it does |
 |---|------|-------------|
@@ -53,7 +53,7 @@ All tools consume the **5,000 free credits / month** shared pool (Web Scraper + 
 | 3 | `scrape_as_markdown` | Any URL → clean markdown (bypasses anti-bot/CAPTCHA) |
 | 4 | `scrape_as_html` | Any URL → raw HTML |
 | 5 | `scrape_batch` | Up to 10 URLs in parallel → markdown |
-| 6 | `discover` | AI-relevance-ranked dataset discovery |
+| 6 | `discover` | AI-ranked public-web discovery (separate enablement) |
 | 7 | `scrape` | **Generic Web Scraper — works for any platform** (LinkedIn, Amazon, Instagram, TikTok, X, YouTube, Reddit, Crunchbase, etc.) |
 | 8 | `scrape_poll` | Poll an async scrape job until ready |
 | 9 | `list_datasets` | List available datasets (cached 1h) |
@@ -84,7 +84,7 @@ Aliases also work: `"amazon"`, `"linkedin"`, `"insta"`, `"tt"`, `"x"`, etc. See 
 | *"Google search for Android Architect jobs India"* | `search_engine(query="Android Architect jobs India")` |
 | *"Scrape this webpage as markdown: example.com"* | `scrape_as_markdown(url="https://example.com")` |
 | *"Unlock this blocked page: example.com"* | `scrape_as_markdown(url="https://example.com")` |
-| *"Discover LinkedIn profiles for 'Android Architect'"* | `discover(query="Android Architect", dataset="linkedin_profile")` |
+| *"Discover recent Android architecture research"* | `discover(query="Android architecture", intent="Recent authoritative engineering articles")` |
 | *"Scrape this Amazon product: amazon.com/dp/B08"* | `scrape(dataset="amazon_product", urls=["https://www.amazon.com/dp/B08..."])` |
 
 ## 📦 Products Covered
@@ -94,13 +94,13 @@ Aliases also work: `"amazon"`, `"linkedin"`, `"insta"`, `"tt"`, `"x"`, etc. See 
 | Web Scraper / Datasets (LinkedIn, Amazon, etc.) | ✅ Yes |
 | SERP API (Google/Bing/Yandex) | ✅ Yes |
 | Web Unlocker API (any URL) | ✅ Yes |
-| Discover API | ✅ Yes (included) |
-| Browser API (Scraping Browser) | ❌ Separate paid product |
+| Discover API | ⚠️ Separate account-gated product |
+| Browser API (Scraping Browser) | ❌ Not exposed by this server |
 | Proxy Infrastructure | ❌ Separate paid product |
 | LLM Insights (ChatGPT/Grok/Perplexity) | ❌ Separate paid product |
 | npm/PyPI package data | ❌ Separate paid product |
 
-> **Note:** 5,000 free credits/month are shared across Web Unlocker, SERP, Web Scraper, and Scraper Studio.
+> **Note:** As of August 20, 2026, 5,000 monthly free credits are shared across Web Unlocker, SERP, Web Scraper, and Scraper Studio. Bright Data documents Browser API inclusion starting September 1, 2026; this server does not expose Browser API.
 
 ## 🚢 Deploy to Zeabur
 
@@ -126,19 +126,20 @@ zeabur deploy
 
 ### MCP Transport on Zeabur
 
-This server uses **stdio** transport by default, which is the standard for local MCP clients. For remote/server-side use, run with **SSE** transport:
+This server uses **stdio** transport by default for local MCP clients. Zeabur is configured to use modern **Streamable HTTP** transport:
 
 ```bash
-MCP_TRANSPORT=sse python brightdata_mcp.py
+MCP_TRANSPORT=http python brightdata_mcp.py
 ```
 
-To expose an SSE endpoint, set `MCP_TRANSPORT=sse` and bind to `0.0.0.0`:
+Set the host and port with the variables used by this project:
 
 ```bash
 # In Zeabur, set environment variable:
-MCP_TRANSPORT=sse
-HOST=0.0.0.0
-PORT=8080
+MCP_TRANSPORT=http
+MCP_HOST=0.0.0.0
+MCP_PORT=8080
+MCP_PATH=/mcp
 ```
 
 ## 🔧 Client Configurations
