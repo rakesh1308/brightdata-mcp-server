@@ -15,11 +15,11 @@
         "required": false
       },
       "SERP_ZONE": {
-        "default": "serp_api",
+        "default": "",
         "required": true
       },
       "WEB_UNLOCKER_ZONE": {
-        "default": "mcp_unlocker",
+        "default": "",
         "required": true
       },
       "MCP_TRANSPORT": {

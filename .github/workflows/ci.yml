@@ -33,10 +33,13 @@ jobs:
           python -m pip install -r requirements.txt ruff
 
       - name: Lint
-        run: ruff check brightdata_mcp.py test_brightdata_mcp.py
+        run: ruff check brightdata_mcp.py test_brightdata_mcp.py live_smoke_test.py
+
+      - name: Format check
+        run: ruff format --check brightdata_mcp.py test_brightdata_mcp.py live_smoke_test.py
 
       - name: Compile
-        run: python -m py_compile brightdata_mcp.py test_brightdata_mcp.py
+        run: python -m py_compile brightdata_mcp.py test_brightdata_mcp.py live_smoke_test.py
 
       - name: Test
         run: python -m unittest -v

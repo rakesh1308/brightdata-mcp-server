@@ -26,15 +26,15 @@ flowchart LR
 
 | Tool | Purpose |
 | --- | --- |
-| `search_engine` | Search Google, Bing, or Yandex as parsed JSON or Markdown |
-| `search_engine_batch` | Run up to 10 searches concurrently while preserving input order |
+| `search_engine` | Search Google as parsed JSON or Bing/Yandex as Markdown, with geo targeting and pagination |
+| `search_engine_batch` | Run up to 10 searches concurrently with per-query engine, geo, language, format, and cursor settings |
 | `scrape_as_markdown` | Retrieve an unlocked page using Bright Data's native Markdown conversion |
 | `scrape_as_html` | Retrieve the complete unlocked HTML response |
 | `scrape_batch` | Retrieve up to 10 pages concurrently as Markdown |
 | `discover` | Run AI-ranked public-web discovery with intent, date, locale, and keyword options |
 | `scrape` | Run collectable Web Scraper datasets with URL shorthand or dataset-specific input objects |
 | `scrape_poll` | Poll snapshot progress and download completed JSON, NDJSON, JSONL, or CSV results |
-| `list_datasets` | Read and cache the live dataset catalog and available dataset IDs |
+| `list_datasets` | Search and paginate the live account dataset catalog and current dataset IDs |
 
 ### Choosing the right tool
 
@@ -87,6 +87,9 @@ Set these values in `.env`:
 | `MCP_HOST` | No | HTTP bind host; defaults to `0.0.0.0` |
 | `MCP_PORT` | No | HTTP port; defaults to `8080` |
 | `MCP_PATH` | No | Streamable HTTP path; defaults to `/mcp` |
+| `BRIGHTDATA_API_BASE_URL` | No | API origin override for testing; defaults to Bright Data's production API |
+
+Zone names have no code defaults. They must match the zones configured in the deployed Bright Data account, preventing a deployment from silently using a stale or unrelated zone name.
 
 Run locally over stdio:
 
@@ -117,11 +120,11 @@ https://your-service.example/mcp
 
 ## Dataset scraping
 
-Dataset IDs can be passed directly, but friendly aliases are resolved against Bright Data's live catalog and cached for one hour:
+Dataset IDs can be passed directly, but friendly names are resolved entirely against Bright Data's live account catalog and cached for one hour:
 
 ```text
 scrape(
-  dataset="amazon_product",
+  dataset="Amazon Products",
   urls=["https://www.amazon.com/dp/PRODUCT_ID"]
 )
 ```
@@ -140,20 +143,26 @@ scrape(
 
 Pass either `urls` or `inputs`, not both. If Bright Data rejects an input, the tool returns its validation body—including required fields or URL patterns—and an actionable hint. Validation failures are not automatically retried asynchronously because the same invalid input would fail again.
 
-Common aliases include `linkedin_profile`, `linkedin_jobs`, `linkedin_company`, `amazon_product`, `amazon_product_reviews`, `instagram_profile`, `tiktok_posts`, `reddit_posts`, and `crunchbase_company`.
+There is no hardcoded dataset-ID or alias registry. Names are normalized and ranked against the current catalog. Ambiguous names are rejected with the closest live matches instead of silently selecting the wrong scraper. Use `list_datasets(query="linkedin jobs")` to discover the exact current name and ID.
 
 Synchronous requests accept up to 20 inputs. Use `async_mode=True` for larger jobs, then pass the returned snapshot ID to `scrape_poll`.
 
 ## Testing
 
-The test suite verifies all nine MCP tool contracts without spending API credits:
+The test suite verifies all nine MCP tool contracts and failure paths without spending API credits:
 
 ```bash
 python -m unittest -v
-python -m py_compile brightdata_mcp.py test_brightdata_mcp.py
+python -m py_compile brightdata_mcp.py test_brightdata_mcp.py live_smoke_test.py
 ```
 
-Authenticated live smoke tests were also used during development to verify SERP, Web Unlocker, Discover, dataset catalog, synchronous scraping, and the complete async snapshot lifecycle.
+Run the authenticated end-to-end proof suite when you intentionally want to spend test requests:
+
+```bash
+python live_smoke_test.py
+```
+
+It exercises every tool, including Google and Bing search behavior, Web Unlocker Markdown/HTML/batch retrieval, Discover, the live dataset catalog, synchronous dataset scraping, and the complete async trigger/poll/download lifecycle. It prints pass/fail metadata only—never credentials or scraped content. Override `BRIGHTDATA_SMOKE_DATASET_NAME` and `BRIGHTDATA_SMOKE_INPUTS` to test another current scraper without changing code.
 
 ## Deploying on Zeabur
 

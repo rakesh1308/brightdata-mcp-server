@@ -3,9 +3,9 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# curl is used by the container health check. Runtime dependencies install
+# from wheels, so a compiler toolchain is intentionally not included.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -15,8 +15,8 @@ COPY requirements.txt .
 # Upgrade pip first to avoid any old resolver issues
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install dependencies with verbose output so build logs show any failures
-RUN pip install --no-cache-dir -r requirements.txt 2>&1 | tail -20
+# Keep pip's exit status and complete error output visible to the builder.
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Verify fastmcp is importable BEFORE we commit to the rest of the build
 RUN python -c "from mcp.server.fastmcp import FastMCP; print('FastMCP import OK')"

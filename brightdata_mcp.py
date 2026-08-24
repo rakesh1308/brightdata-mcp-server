@@ -34,10 +34,14 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
+from typing import Literal
+from urllib.parse import urlencode, urlsplit
 
 import requests
 from dotenv import load_dotenv
@@ -45,9 +49,15 @@ from dotenv import load_dotenv
 # ────────────────────────────────────────────────────────────────────
 # Silence noisy pydantic-settings warnings
 # ────────────────────────────────────────────────────────────────────
-warnings.filterwarnings("ignore", message=r".*incomplete definition.*lifespan.*", category=UserWarning)
-warnings.filterwarnings("ignore", message=r".*lifespan.*incomplete definition.*", category=UserWarning)
-warnings.filterwarnings("ignore", module=r"pydantic_settings\.sources\.utils", category=UserWarning)
+warnings.filterwarnings(
+    "ignore", message=r".*incomplete definition.*lifespan.*", category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore", message=r".*lifespan.*incomplete definition.*", category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore", module=r"pydantic_settings\.sources\.utils", category=UserWarning
+)
 logging.getLogger("pydantic_settings").setLevel(logging.ERROR)
 
 try:
@@ -63,8 +73,12 @@ except ImportError as e:
 load_dotenv()
 
 # ─── Configuration ───────────────────────────────────────────────
-API_TOKEN = os.getenv("BRIGHTDATA_API_KEY") or os.getenv("BRIGHTDATA_API_TOKEN", "YOUR_API_KEY")
-BASE_URL = "https://api.brightdata.com"
+API_TOKEN = os.getenv("BRIGHTDATA_API_KEY") or os.getenv(
+    "BRIGHTDATA_API_TOKEN", "YOUR_API_KEY"
+)
+BASE_URL = os.getenv("BRIGHTDATA_API_BASE_URL", "https://api.brightdata.com").rstrip(
+    "/"
+)
 DATASETS_SCRAPE = f"{BASE_URL}/datasets/v3/scrape"
 DATASETS_TRIGGER = f"{BASE_URL}/datasets/v3/trigger"
 DATASETS_SNAPSHOT = f"{BASE_URL}/datasets/v3/snapshot"
@@ -73,78 +87,58 @@ DATASETS_LIST = f"{BASE_URL}/datasets/list"
 DISCOVER_URL = f"{BASE_URL}/discover"
 REQUEST_URL = f"{BASE_URL}/request"  # SERP + Web Unlocker
 
-SERP_ZONE = os.getenv("SERP_ZONE", "serp_api")
-UNLOCKER_ZONE = os.getenv("WEB_UNLOCKER_ZONE", "mcp_unlocker")
+SERP_ZONE = os.getenv("SERP_ZONE", "").strip()
+UNLOCKER_ZONE = os.getenv("WEB_UNLOCKER_ZONE", "").strip()
 
 headers = {
     "Authorization": f"Bearer {API_TOKEN}",
     "Content-Type": "application/json",
 }
 
+
 # ─── Dataset Registry ──────────────────────────────────────────
 # Strategy: NO hardcoded dataset IDs. Bright Data's catalog changes over
-# time; any hardcoded ID may become stale. We saw this firsthand — the
-# Amazon dataset ID changed from gd_l7q7dkf244hwjntr0w (old) to
-# gd_l7q7dkf244hwjntr0 (current) — a 1-character difference that broke
-# scrapes.
+# time, so IDs and friendly names are resolved from the authenticated live
+# account catalog.
 #
 # Instead:
 #   1. Bare dataset_ids starting with "gd_" are passed through as-is
 #      (always works — call list_datasets() to discover what's available)
 #   2. Friendly names are resolved by lazy-fetching from the live catalog
 #      (cached 1h via list_datasets()) and fuzzy-matching by name
-#   3. A few common aliases (linkedin, amazon, etc.) shortcut the friendly name
+def _normalized_words(value: str) -> list[str]:
+    """Normalize a dataset name without relying on a maintained alias table."""
+    words = re.findall(r"[a-z0-9]+", str(value).lower().replace("_", " "))
+    return [
+        word[:-1] if len(word) > 3 and word.endswith("s") else word for word in words
+    ]
 
-# Short aliases only — these map to substring-matchable fragments of
-# catalog names. resolve_dataset() does a case-insensitive substring match
-# against the live catalog (cached 1h), so the fragments just need to be
-# specific enough to pick the right dataset.
-DATASET_ALIASES = {
-    # ── LinkedIn ──────────────────────────────────────────────
-    "linkedin":         "linkedin people profiles",
-    "linkedin_profile": "linkedin people profiles",
-    "linkedin_jobs":    "linkedin job listings",
-    "linkedin_company": "linkedin company information",
 
-    # ── Amazon ────────────────────────────────────────────────
-    "amazon":     "amazon products",
-    "amzn":       "amazon products",
-    "amazon_product":        "amazon products",
-    "amazon_product_reviews": "amazon reviews",
-    "amazon_product_search":  "amazon products search",
+def _normalized_name(value: str) -> str:
+    return " ".join(_normalized_words(value))
 
-    # ── Instagram / TikTok / Facebook ─────────────────────────
-    "insta":      "instagram - profiles",
-    "ig":         "instagram - profiles",
-    "instagram":  "instagram - profiles",
-    "instagram_profile": "instagram - profiles",
-    "tt":         "tiktok - posts by profile",
-    "tiktok":     "tiktok - profiles",
-    "tiktok_posts": "tiktok - posts by profile",
-    "fb":         "facebook - posts by post url",
-    "facebook":   "facebook - posts by post url",
 
-    # ── X / Twitter / YouTube / Reddit ────────────────────────
-    "twitter":    "x (formerly twitter) - posts",
-    "x":          "x (formerly twitter) - posts",
-    "x_posts":    "x (formerly twitter) - posts",
-    "yt":         "youtube - videos posts",
-    "youtube":    "youtube - videos posts",
-    "reddit":     "reddit- posts",
-    "reddit_posts": "reddit- posts",
+def _dataset_match_score(query: str, candidate: str) -> float:
+    """Score live catalog names using normalized text and token overlap."""
+    query_name = _normalized_name(query)
+    candidate_name = _normalized_name(candidate)
+    query_words = set(query_name.split())
+    candidate_words = set(candidate_name.split())
+    union = query_words | candidate_words
+    token_score = len(query_words & candidate_words) / len(union) if union else 0.0
+    text_score = SequenceMatcher(None, query_name, candidate_name).ratio()
+    return (0.65 * token_score) + (0.35 * text_score)
 
-    # ── Business ──────────────────────────────────────────────
-    "crunchbase":     "crunchbase companies information",
-    "crunchbase_company": "crunchbase companies information",
 
-    # ── Other ─────────────────────────────────────────────────
-    "google":     "google shopping",
-    "maps":       "google maps businesses",
-    "walmart":    "walmart - products",
-    "ebay":       "ebay - products",
-    "etsy":       "etsy - products",
-    "bestbuy":    "best buy - products",
-}
+def _dataset_name_matches(query: str, candidate: str) -> bool:
+    """Return whether a live catalog name has a meaningful query overlap."""
+    query_name = _normalized_name(query)
+    candidate_name = _normalized_name(candidate)
+    if not query_name or not candidate_name:
+        return False
+    if query_name in candidate_name or candidate_name in query_name:
+        return True
+    return bool(set(query_name.split()) & set(candidate_name.split()))
 
 
 def _get_catalog(force_refresh: bool = False) -> list:
@@ -155,27 +149,31 @@ def _get_catalog(force_refresh: bool = False) -> list:
     if not force_refresh and cached_data and (now - fetched_at) < _CATALOG_TTL_SECONDS:
         return cached_data.get("datasets", [])
     try:
+        _require_api_key()
         r = requests.get(DATASETS_LIST, headers=headers, timeout=30)
-        r.raise_for_status()
+        _raise_for_api_error(r, "Dataset catalog")
         data = r.json()
         datasets = data if isinstance(data, list) else data.get("datasets", [])
         if datasets:
             _DATASET_CATALOG_CACHE["data"] = {"datasets": datasets}
             _DATASET_CATALOG_CACHE["fetched_at"] = now
+            _DATASET_CATALOG_CACHE["error"] = None
             return datasets
-    except (requests.RequestException, ValueError):
-        pass
+        _DATASET_CATALOG_CACHE["error"] = (
+            "Bright Data returned an empty dataset catalog."
+        )
+    except (requests.RequestException, RuntimeError, ValueError) as exc:
+        _DATASET_CATALOG_CACHE["error"] = str(exc)
     return cached_data.get("datasets", []) if cached_data else []
 
 
 def resolve_dataset(name: str) -> str:
     """
-    Resolve a friendly name / alias / bare dataset_id → real dataset_id.
+    Resolve a friendly name or bare dataset_id → real dataset_id.
 
     Strategy:
       - Bare id starting with 'gd_': passed through as-is
-      - Alias from DATASET_ALIASES: expanded to a friendly name
-      - Friendly name: fuzzy-matched against the live catalog (cached 1h)
+      - Friendly name: matched against the live account catalog (cached 1h)
 
     Always works for bare ids. For friendly names, the catalog must be
     populated — either via a prior list_datasets() call or by lazy fetch.
@@ -183,10 +181,13 @@ def resolve_dataset(name: str) -> str:
     if not name:
         raise ValueError("Empty dataset name")
     # Bare dataset_id — always works
+    name = str(name).strip()
     if name.startswith("gd_"):
+        if not re.fullmatch(r"gd_[A-Za-z0-9]+", name):
+            raise ValueError(
+                "dataset IDs may contain only letters and numbers after 'gd_'"
+            )
         return name
-    # Alias → friendly name
-    target = DATASET_ALIASES.get(name.lower(), name.lower())
     # Lazy-fetch the live catalog
     catalog = _get_catalog()
     if not catalog:
@@ -197,17 +198,29 @@ def resolve_dataset(name: str) -> str:
         )
     # Exact match (case-insensitive)
     for ds in catalog:
-        if ds.get("name", "").lower() == target.lower():
+        if _normalized_name(ds.get("name", "")) == _normalized_name(name):
             return ds["id"]
-    # Substring match — pick the shortest name (most specific)
-    matches = [ds for ds in catalog if target.lower() in ds.get("name", "").lower()]
-    if matches:
-        matches.sort(key=lambda d: len(d.get("name", "")))
-        return matches[0]["id"]
+    ranked = sorted(
+        ((_dataset_match_score(name, ds.get("name", "")), ds) for ds in catalog),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if ranked:
+        best_score, best = ranked[0]
+        next_score = ranked[1][0] if len(ranked) > 1 else 0.0
+        if best_score >= 0.68 and best_score - next_score >= 0.08:
+            return best["id"]
+        suggestions = ", ".join(
+            f"{ds.get('name', '')} ({ds.get('id', '')})" for _, ds in ranked[:5]
+        )
+        raise ValueError(
+            f"Dataset name '{name}' is unknown or ambiguous. Closest live matches: "
+            f"{suggestions}. Pass the exact name or a bare gd_* ID."
+        )
     # Nothing matched
     sample = ", ".join(ds.get("name", "") for ds in catalog[:5])
     raise ValueError(
-        f"Unknown dataset: '{name}'. Could not find '{target}' in the live catalog. "
+        f"Unknown dataset: '{name}'. Could not find it in the live catalog. "
         f"Sample of available names: {sample}. "
         f"Try list_datasets() to see all {len(catalog)} available datasets. "
         f"Or pass a bare dataset_id starting with 'gd_'."
@@ -218,7 +231,7 @@ def _coerce_to_list(value) -> list:
     """
     Coerce various input shapes to a list of strings. Handles:
       - None    → []
-      - str     → [str]   (also parses JSON arrays and comma-separated lists)
+      - str     → [str]   (also parses JSON arrays)
       - list/tuple → [str(x) for x in value]
     This makes MCP tool parameters robust to clients that send single
     strings instead of single-element lists.
@@ -237,14 +250,35 @@ def _coerce_to_list(value) -> list:
                     return [str(x) for x in parsed if x is not None]
             except ValueError:
                 pass
-        # Comma-separated?
-        if "," in v and "\n" not in v:
-            return [s.strip() for s in v.split(",") if s.strip()]
-        # Single string
+        # A plain string is one item. Splitting on commas corrupts valid URLs
+        # and natural-language queries; callers can pass a list or JSON array.
         return [v]
     if isinstance(value, (list, tuple)):
         return [str(x) for x in value if x is not None]
     return [str(value)]
+
+
+def _coerce_items(value) -> list:
+    """Normalize a single item, JSON array, or native sequence without stringifying objects."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+            except ValueError as exc:
+                raise ValueError(
+                    "value looks like a JSON array but is invalid JSON"
+                ) from exc
+            if isinstance(parsed, list):
+                return parsed
+        return [stripped]
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
 
 
 def _coerce_scrape_inputs(value) -> list[dict]:
@@ -253,7 +287,9 @@ def _coerce_scrape_inputs(value) -> list[dict]:
         try:
             value = json.loads(value)
         except ValueError as exc:
-            raise ValueError("inputs must be valid JSON when provided as a string") from exc
+            raise ValueError(
+                "inputs must be valid JSON when provided as a string"
+            ) from exc
     if isinstance(value, dict):
         value = [value]
     if not isinstance(value, (list, tuple)) or not value:
@@ -269,6 +305,80 @@ def _validate_choice(value: str, allowed: set, parameter: str) -> str:
         choices = ", ".join(sorted(allowed))
         raise ValueError(f"Invalid {parameter} '{value}'. Expected one of: {choices}.")
     return normalized
+
+
+def _require_api_key() -> None:
+    if not API_TOKEN or API_TOKEN == "YOUR_API_KEY":
+        raise RuntimeError("BRIGHTDATA_API_KEY is not configured")
+
+
+def _require_zone(value: str, env_name: str) -> str:
+    _require_api_key()
+    if not value:
+        raise RuntimeError(f"{env_name} is not configured")
+    return value
+
+
+def _validate_url(value: str, parameter: str = "url") -> str:
+    value = str(value).strip()
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{parameter} must be an absolute HTTP or HTTPS URL")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{parameter} must not contain embedded credentials")
+    return value
+
+
+def _validate_country(value: str | None, parameter: str = "country") -> str | None:
+    if value is None or str(value).strip() == "":
+        return None
+    value = str(value).strip()
+    if not re.fullmatch(r"[A-Za-z]{2}", value):
+        raise ValueError(f"{parameter} must be a 2-letter country code")
+    return value.lower()
+
+
+def _validate_cursor(value) -> int:
+    if value in (None, ""):
+        return 0
+    try:
+        cursor = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cursor must be a non-negative page number") from exc
+    if cursor < 0:
+        raise ValueError("cursor must be a non-negative page number")
+    return cursor
+
+
+def _build_search_url(
+    engine: str,
+    query: str,
+    cursor=0,
+    country: str | None = None,
+    language: str | None = None,
+) -> str:
+    """Build the documented engine URL while preserving optional targeting."""
+    cursor = _validate_cursor(cursor)
+    country = _validate_country(country)
+    params = {"q": query}
+    if engine == "google":
+        params["start"] = cursor * 10
+        if country:
+            params["gl"] = country
+        if language:
+            params["hl"] = str(language).strip()
+        return f"https://www.google.com/search?{urlencode(params)}"
+    if engine == "bing":
+        params["first"] = (cursor * 10) + 1
+        if country:
+            params["cc"] = country
+        if language:
+            params["setlang"] = str(language).strip()
+        return f"https://www.bing.com/search?{urlencode(params)}"
+    yandex_params = {"text": query, "p": cursor}
+    if language:
+        yandex_params["lang"] = str(language).strip()
+    return f"https://yandex.com/search/?{urlencode(yandex_params)}"
 
 
 def _response_json(response: requests.Response):
@@ -290,13 +400,36 @@ def _error_details(response: requests.Response):
         return response.text[:2000] or "Bright Data returned an empty error response."
 
 
-def _scrape_error(response: requests.Response, dataset_id: str, async_mode: bool) -> dict:
+def _raise_for_api_error(response: requests.Response, operation: str) -> None:
+    """Raise a bounded, actionable error that retains Bright Data's response body."""
+    if response.status_code < 400:
+        return
+    details = _error_details(response)
+    rendered = (
+        details if isinstance(details, str) else json.dumps(details, ensure_ascii=False)
+    )
+    raise requests.HTTPError(
+        f"{operation} failed (HTTP {response.status_code}): {rendered[:2000]}",
+        response=response,
+    )
+
+
+def _scrape_error(
+    response: requests.Response, dataset_id: str, async_mode: bool
+) -> dict:
     """Build an actionable MCP result for a rejected Web Scraper API request."""
     details = _error_details(response)
-    searchable = json.dumps(details, ensure_ascii=True) if not isinstance(details, str) else details
+    searchable = (
+        json.dumps(details, ensure_ascii=True)
+        if not isinstance(details, str)
+        else details
+    )
     searchable = searchable.lower()
 
-    if "does not support collection" in searchable or "not allowed for api" in searchable:
+    if (
+        "does not support collection" in searchable
+        or "not allowed for api" in searchable
+    ):
         hint = (
             "This catalog entry cannot be collected through the Web Scraper API. "
             "Choose a collectable scraper dataset from Bright Data's Scrapers Library. "
@@ -346,6 +479,18 @@ MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8080"))
 MCP_PATH = os.getenv("MCP_PATH", "/mcp")
 MCP_STATELESS = os.getenv("MCP_STATELESS", "true").lower() in ("1", "true", "yes")
+SERVER_VERSION = "4.0.0"
+TOOL_NAMES = (
+    "search_engine",
+    "search_engine_batch",
+    "scrape_as_markdown",
+    "scrape_as_html",
+    "scrape_batch",
+    "discover",
+    "scrape",
+    "scrape_poll",
+    "list_datasets",
+)
 
 mcp = FastMCP(
     "brightdata-free",
@@ -363,27 +508,33 @@ from starlette.responses import JSONResponse, Response
 
 @mcp.custom_route("/health", methods=["GET"])
 def health(request):
-    return JSONResponse({
-        "status": "ok",
-        "server": "brightdata-free",
-        "transport": MCP_TRANSPORT,
-        "token_configured": bool(API_TOKEN and API_TOKEN != "YOUR_API_KEY"),
-    })
+    return JSONResponse(
+        {
+            "status": "ok",
+            "server": "brightdata-free",
+            "transport": MCP_TRANSPORT,
+            "token_configured": bool(API_TOKEN and API_TOKEN != "YOUR_API_KEY"),
+            "serp_zone_configured": bool(SERP_ZONE),
+            "unlocker_zone_configured": bool(UNLOCKER_ZONE),
+        }
+    )
 
 
 @mcp.custom_route("/", methods=["GET"])
 def root(request):
-    return JSONResponse({
-        "name": "brightdata-free-mcp",
-        "version": "3.2.0",
-        "mcp_endpoint": MCP_PATH,
-        "transport": MCP_TRANSPORT,
-        "billing": "5,000 monthly free credits: Web Scraper + SERP + Web Unlocker. "
-                   "Discover API is separate and account-gated.",
-        "auth_env_var": "BRIGHTDATA_API_KEY",
-        "auth_legacy_alias": "BRIGHTDATA_API_TOKEN",
-        "tool_count": 9,
-    })
+    return JSONResponse(
+        {
+            "name": "brightdata-free-mcp",
+            "version": SERVER_VERSION,
+            "mcp_endpoint": MCP_PATH,
+            "transport": MCP_TRANSPORT,
+            "billing": "5,000 monthly free credits: Web Scraper + SERP + Web Unlocker. "
+            "Discover API is separate and account-gated.",
+            "auth_env_var": "BRIGHTDATA_API_KEY",
+            "auth_legacy_alias": "BRIGHTDATA_API_TOKEN",
+            "tool_count": len(TOOL_NAMES),
+        }
+    )
 
 
 @mcp.custom_route("/favicon.ico", methods=["GET"])
@@ -398,7 +549,9 @@ def favicon(request):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Bright Data Free-Credit MCP Server")
-    parser.add_argument("--transport", choices=["stdio", "http", "sse"], default=MCP_TRANSPORT)
+    parser.add_argument(
+        "--transport", choices=["stdio", "http", "sse"], default=MCP_TRANSPORT
+    )
     parser.add_argument("--host", default=MCP_HOST)
     parser.add_argument("--port", type=int, default=MCP_PORT)
     parser.add_argument("--path", default=MCP_PATH)
@@ -406,7 +559,7 @@ def parse_args():
 
 
 # Catalog cache (used by list_datasets)
-_DATASET_CATALOG_CACHE = {"data": None, "fetched_at": 0.0}
+_DATASET_CATALOG_CACHE = {"data": None, "fetched_at": 0.0, "error": None}
 _CATALOG_TTL_SECONDS = 3600
 
 
@@ -414,74 +567,109 @@ _CATALOG_TTL_SECONDS = 3600
 # BASE TOOLS  (always-on equivalents of Bright Data's hosted MCP)
 # ═════════════════════════════════════════════════════════════════
 
+
 @mcp.tool()
 def search_engine(
     query: str,
-    engine: str = "google",
-    country: str = "in",
-    language: str = "en",
-    output_format: str = "json",
+    engine: Literal["google", "bing", "yandex"] = "google",
+    country: str | None = None,
+    language: str | None = None,
+    output_format: Literal["auto", "json", "markdown"] = "auto",
+    cursor: int = 0,
 ) -> dict:
     """
     Search Google, Bing, or Yandex — structured SERP results.
     Cost: 1 credit / call.
 
-    output_format="json" uses Bright Data's parsed_light response. Set it to
-    "markdown" to request Bright Data's native Markdown transformation.
+    Google supports parsed JSON; Bing and Yandex return Markdown, matching
+    Bright Data's official MCP contract. cursor is a zero-based page number.
     """
     engine = _validate_choice(engine, {"google", "bing", "yandex"}, "engine")
-    output_format = _validate_choice(output_format, {"json", "markdown"}, "output_format")
+    output_format = _validate_choice(
+        output_format, {"auto", "json", "markdown"}, "output_format"
+    )
     if not query or not query.strip():
         raise ValueError("query must not be empty")
-    country = country.lower()
-    engines = {
-        "google": f"https://www.google.com/search?q={requests.utils.quote(query)}&hl={language}&gl={country}",
-        "bing":   f"https://www.bing.com/search?q={requests.utils.quote(query)}&setlang={language}&cc={country}",
-        "yandex": f"https://yandex.com/search/?text={requests.utils.quote(query)}&lang={language}",
-    }
-    url = engines[engine]
-
-    if output_format == "markdown":
-        payload = {
-            "zone": SERP_ZONE, "url": url, "format": "raw",
-            "data_format": "markdown", "country": country,
-        }
-        r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-        r.raise_for_status()
-        return {"markdown": r.text}
-
+    query = query.strip()
+    country = _validate_country(country)
+    url = _build_search_url(engine, query, cursor, country, language)
+    effective_format = (
+        ("json" if engine == "google" else "markdown")
+        if output_format == "auto"
+        else output_format
+    )
+    if effective_format == "json" and engine != "google":
+        raise ValueError(
+            "Bright Data returns Bing and Yandex searches as Markdown; use output_format='auto' or 'markdown'."
+        )
     payload = {
-        "zone": SERP_ZONE, "url": url, "format": "raw",
-        "data_format": "parsed_light", "country": country,
+        "zone": _require_zone(SERP_ZONE, "SERP_ZONE"),
+        "url": url,
+        "format": "raw",
+        "data_format": "parsed_light" if effective_format == "json" else "markdown",
     }
+    if country:
+        payload["country"] = country
     r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-    r.raise_for_status()
-    return _response_json(r)
+    _raise_for_api_error(r, f"{engine} search")
+    if effective_format == "json":
+        return _response_json(r)
+    return {
+        "engine": engine,
+        "query": query,
+        "cursor": _validate_cursor(cursor),
+        "format": "markdown",
+        "markdown": r.text,
+    }
 
 
 @mcp.tool()
 def search_engine_batch(
-    queries: list,
-    engine: str = "google",
-    country: str = "in",
-    language: str = "en",
+    queries: list[str | dict],
+    engine: Literal["google", "bing", "yandex"] = "google",
+    country: str | None = None,
+    language: str | None = None,
+    output_format: Literal["auto", "json", "markdown"] = "auto",
 ) -> dict:
     """
     Run up to 10 search queries in parallel. Cost: 1 credit / query.
-    Accepts either a list of strings or a single comma-separated string.
+    Each item may be a string or an object with query, engine, country,
+    language, output_format, and cursor. Global values are fallbacks.
     """
-    qs = _coerce_to_list(queries)
+    qs = _coerce_items(queries)
     if not qs or len(qs) > 10:
         raise ValueError("queries must contain between 1 and 10 items")
 
-    def worker(q):
+    jobs = []
+    for item in qs:
+        if isinstance(item, str):
+            jobs.append({"query": item})
+        elif isinstance(item, dict):
+            jobs.append(dict(item))
+        else:
+            raise TypeError("each query must be a string or an object")
+
+    def worker(job):
+        q = str(job.get("query", "")).strip()
         try:
-            data = search_engine(q, engine, country, language, "json")
-            return {"query": q, "ok": True, "data": data}
-        except (requests.RequestException, ValueError) as e:
+            data = search_engine(
+                q,
+                job.get("engine", engine),
+                job.get("country", country),
+                job.get("language", language),
+                job.get("output_format", output_format),
+                job.get("cursor", 0),
+            )
+            return {
+                "query": q,
+                "engine": job.get("engine", engine),
+                "ok": True,
+                "data": data,
+            }
+        except (requests.RequestException, RuntimeError, ValueError) as e:
             return {"query": q, "ok": False, "error": str(e)}
 
-    results = _run_parallel(qs, worker)
+    results = _run_parallel(jobs, worker)
     return {"results": results, "count": len(results)}
 
 
@@ -492,11 +680,13 @@ def scrape_as_markdown(url: str) -> str:
     Cost: 1 credit / call.
     """
     payload = {
-        "zone": UNLOCKER_ZONE, "url": url, "format": "raw",
+        "zone": _require_zone(UNLOCKER_ZONE, "WEB_UNLOCKER_ZONE"),
+        "url": _validate_url(url),
+        "format": "raw",
         "data_format": "markdown",
     }
     response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
+    _raise_for_api_error(response, "Markdown scrape")
     return response.text
 
 
@@ -505,17 +695,21 @@ def scrape_as_html(url: str) -> str:
     """
     Fetch any URL → raw HTML. Cost: 1 credit / call.
     """
-    payload = {"zone": UNLOCKER_ZONE, "url": url, "format": "raw"}
+    payload = {
+        "zone": _require_zone(UNLOCKER_ZONE, "WEB_UNLOCKER_ZONE"),
+        "url": _validate_url(url),
+        "format": "raw",
+    }
     response = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
+    _raise_for_api_error(response, "HTML scrape")
     return response.text
 
 
 @mcp.tool()
-def scrape_batch(urls: list) -> dict:
+def scrape_batch(urls: list[str]) -> dict:
     """
     Fetch up to 10 URLs in parallel → markdown. Cost: 1 credit / URL.
-    Accepts either a list of strings or a single comma-separated string.
+    Accepts a list, JSON array string, or a single URL.
     """
     url_list = _coerce_to_list(urls)
     if not url_list or len(url_list) > 10:
@@ -523,14 +717,17 @@ def scrape_batch(urls: list) -> dict:
 
     def worker(u):
         try:
+            u = _validate_url(u)
             payload = {
-                "zone": UNLOCKER_ZONE, "url": u, "format": "raw",
+                "zone": _require_zone(UNLOCKER_ZONE, "WEB_UNLOCKER_ZONE"),
+                "url": u,
+                "format": "raw",
                 "data_format": "markdown",
             }
             r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
-            r.raise_for_status()
+            _raise_for_api_error(r, "Batch Markdown scrape")
             return {"url": u, "ok": True, "markdown": r.text}
-        except (requests.RequestException, ValueError) as e:
+        except (requests.RequestException, RuntimeError, ValueError) as e:
             return {"url": u, "ok": False, "error": str(e)}
 
     results = _run_parallel(url_list, worker)
@@ -541,17 +738,18 @@ def scrape_batch(urls: list) -> dict:
 def discover(
     query: str,
     intent: str | None = None,
+    mode: Literal["standard", "zeroRanking", "deep", "fast"] = "standard",
     start_date: str | None = None,
     end_date: str | None = None,
     limit: int = 10,
-    country: str = "US",
+    country: str | None = None,
     city: str | None = None,
-    language: str = "en",
-    filter_keywords: list | None = None,
+    language: str | None = None,
+    filter_keywords: list[str] | None = None,
     include_content: bool = False,
     include_images: bool = False,
     remove_duplicates: bool = True,
-    output_format: str = "json",
+    output_format: Literal["json", "md"] = "json",
     max_wait_seconds: int = 120,
 ) -> dict:
     """
@@ -570,19 +768,31 @@ def discover(
     """
     if not query or not query.strip():
         raise ValueError("query must not be empty")
+    query = query.strip()
+    if len(query) > 1500:
+        raise ValueError("query must contain at most 1500 characters")
+    if intent and len(intent) > 3000:
+        raise ValueError("intent must contain at most 3000 characters")
     if not 1 <= limit <= 20:
         raise ValueError("limit must be between 1 and 20")
+    mode = _validate_choice(mode, {"standard", "zeroranking", "deep", "fast"}, "mode")
+    if mode == "zeroranking" and include_content:
+        raise ValueError("include_content is not supported when mode='zeroRanking'")
     output_format = _validate_choice(output_format, {"json", "md"}, "output_format")
+    normalized_country = _validate_country(country)
     payload = {
         "query": query,
         "num_results": limit,
         "format": output_format,
-        "country": country.upper(),
-        "language": language,
+        "mode": "zeroRanking" if mode == "zeroranking" else mode,
         "include_content": include_content,
         "include_images": include_images,
         "remove_duplicates": remove_duplicates,
     }
+    if normalized_country:
+        payload["country"] = normalized_country.upper()
+    if language:
+        payload["language"] = str(language).strip()
     if intent:
         payload["intent"] = intent
     if start_date:
@@ -595,15 +805,19 @@ def discover(
     if keywords:
         payload["filter_keywords"] = keywords
 
+    _require_api_key()
     response = requests.post(
-        DISCOVER_URL, headers=headers, json=payload, timeout=60,
+        DISCOVER_URL,
+        headers=headers,
+        json=payload,
+        timeout=60,
     )
     if response.status_code == 403:
         return {
             "error": "Discover API is not enabled for this Bright Data account.",
             "hint": "Ask your Bright Data account manager to enable Discover API, or use search_engine.",
         }
-    response.raise_for_status()
+    _raise_for_api_error(response, "Discover trigger")
     task = _response_json(response)
     task_id = task.get("task_id")
     if not task_id or max_wait_seconds <= 0:
@@ -617,7 +831,7 @@ def discover(
             params={"task_id": task_id},
             timeout=60,
         )
-        result_response.raise_for_status()
+        _raise_for_api_error(result_response, "Discover polling")
         result = _response_json(result_response)
         status = str(result.get("status", "")).lower()
         if status in {"done", "ready", "completed"}:
@@ -636,10 +850,10 @@ def discover(
 @mcp.tool()
 def scrape(
     dataset: str,
-    urls: list | None = None,
-    inputs: list | None = None,
+    urls: list[str] | None = None,
+    inputs: list[dict] | None = None,
     async_mode: bool = False,
-    output_format: str = "json",
+    output_format: Literal["json", "ndjson", "jsonl", "csv"] = "json",
 ) -> dict:
     """
     Generic Web Scraper entrypoint for collectable Bright Data scraper datasets.
@@ -647,7 +861,7 @@ def scrape(
 
     Args:
         dataset: Friendly name or bare gd_* id. Resolved against live catalog.
-        urls: List of collect-by-URL targets (or a single/comma-separated string).
+        urls: List of collect-by-URL targets (or a single URL / JSON-array string).
               This shorthand creates one {"url": value} object per URL.
         inputs: Dataset-specific input objects. Use instead of urls when the
                 dataset requires fields such as country, keyword, or product ID.
@@ -659,7 +873,10 @@ def scrape(
         sync:  {"dataset_id": "...", "results": [...]}
         async: {"dataset_id": "...", "snapshot_id": "..."}
     """
-    output_format = _validate_choice(output_format, {"json", "ndjson", "jsonl", "csv"}, "output_format")
+    _require_api_key()
+    output_format = _validate_choice(
+        output_format, {"json", "ndjson", "jsonl", "csv"}, "output_format"
+    )
     real_id = resolve_dataset(dataset)
 
     if urls is not None and inputs is not None:
@@ -673,10 +890,12 @@ def scrape(
                 "error": "No scraper inputs provided.",
                 "hint": "Pass urls=[...] or dataset-specific inputs=[{...}].",
             }
-        input_rows = [{"url": url} for url in url_list]
+        input_rows = [{"url": _validate_url(url, "scraper URL")} for url in url_list]
 
     if not async_mode and len(input_rows) > 20:
-        raise ValueError("Synchronous scraping accepts at most 20 inputs; set async_mode=True for larger batches.")
+        raise ValueError(
+            "Synchronous scraping accepts at most 20 inputs; set async_mode=True for larger batches."
+        )
     endpoint = DATASETS_TRIGGER if async_mode else DATASETS_SCRAPE
     timeout = 60 if async_mode else 120
     response = requests.post(
@@ -688,12 +907,16 @@ def scrape(
     )
     if response.status_code >= 400:
         return _scrape_error(response, real_id, async_mode)
-    response.raise_for_status()
     if async_mode or response.status_code == 202:
         data = _response_json(response)
+        snapshot_id = data.get("snapshot_id") if isinstance(data, dict) else None
+        if not snapshot_id:
+            raise ValueError(
+                f"Bright Data accepted the scrape but returned no snapshot_id: {data}"
+            )
         return {
             "dataset_id": real_id,
-            "snapshot_id": data["snapshot_id"],
+            "snapshot_id": snapshot_id,
             "status": "running",
             "format": output_format,
         }
@@ -706,7 +929,7 @@ def scrape(
 def scrape_poll(
     snapshot_id: str,
     max_wait_seconds: int = 300,
-    output_format: str = "json",
+    output_format: Literal["json", "ndjson", "jsonl", "csv"] = "json",
 ) -> dict:
     """
     Poll an async scrape job until ready. Polling is free.
@@ -721,13 +944,23 @@ def scrape_poll(
         {"error": "Timeout after Ns — still processing"} if still running,
         {"error": "Snapshot not found", "snapshot_id": "..."} if 404.
     """
-    output_format = _validate_choice(output_format, {"json", "ndjson", "jsonl", "csv"}, "output_format")
+    _require_api_key()
+    output_format = _validate_choice(
+        output_format, {"json", "ndjson", "jsonl", "csv"}, "output_format"
+    )
+    snapshot_id = str(snapshot_id).strip()
+    if not snapshot_id or any(char in snapshot_id for char in "/?#"):
+        raise ValueError("snapshot_id is invalid")
+    if max_wait_seconds < 0:
+        raise ValueError("max_wait_seconds must be non-negative")
     deadline = time.monotonic() + max(0, max_wait_seconds)
     while True:
-        r = requests.get(f"{DATASETS_PROGRESS}/{snapshot_id}", headers=headers, timeout=30)
+        r = requests.get(
+            f"{DATASETS_PROGRESS}/{snapshot_id}", headers=headers, timeout=30
+        )
         if r.status_code == 404:
             return {"error": "Snapshot not found", "snapshot_id": snapshot_id}
-        r.raise_for_status()
+        _raise_for_api_error(r, "Snapshot progress")
         progress = _response_json(r)
         status = str(progress.get("status", "")).lower()
         if status == "ready":
@@ -737,8 +970,10 @@ def scrape_poll(
                 params={"format": output_format},
                 timeout=120,
             )
-            download.raise_for_status()
-            results = _response_json(download) if output_format == "json" else download.text
+            _raise_for_api_error(download, "Snapshot download")
+            results = (
+                _response_json(download) if output_format == "json" else download.text
+            )
             return {
                 "status": "ready",
                 "snapshot_id": snapshot_id,
@@ -757,44 +992,59 @@ def scrape_poll(
 
 
 @mcp.tool()
-def list_datasets(force_refresh: bool = False) -> dict:
+def list_datasets(
+    force_refresh: bool = False,
+    query: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
     """
-    List available datasets — fetches the live Bright Data catalog (cached 1h).
-    Returns ~1700+ datasets with their current IDs.
+    List datasets from the live account catalog (cached 1h). Use query to find
+    matching names dynamically. Pagination prevents oversized MCP responses.
     """
-    now = time.time()
-    if not force_refresh and _DATASET_CATALOG_CACHE["data"] and (now - _DATASET_CATALOG_CACHE["fetched_at"]) < _CATALOG_TTL_SECONDS:
-        return _DATASET_CATALOG_CACHE["data"]
-
-    error = "Bright Data returned an empty dataset catalog."
-    try:
-        r = requests.get(DATASETS_LIST, headers=headers, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        datasets = data if isinstance(data, list) else data.get("datasets", [])
-        if datasets:
-            result = {
-                "count": len(datasets),
-                "datasets": datasets,
-                "aliases": DATASET_ALIASES,
-            }
-            _DATASET_CATALOG_CACHE["data"] = result
-            _DATASET_CATALOG_CACHE["fetched_at"] = now
-            return result
-    except (requests.RequestException, ValueError) as exc:
-        error = str(exc)
-
+    _require_api_key()
+    if not 1 <= limit <= 2000:
+        raise ValueError("limit must be between 1 and 2000")
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    datasets = _get_catalog(force_refresh=force_refresh)
+    if not datasets:
+        return {
+            "count": 0,
+            "total": 0,
+            "datasets": [],
+            "error": _DATASET_CATALOG_CACHE.get("error")
+            or "Live dataset catalog unavailable or empty.",
+            "note": "Try again, or pass a bare dataset_id starting with 'gd_'.",
+        }
+    if query and query.strip():
+        ranked = sorted(
+            (
+                (_dataset_match_score(query, ds.get("name", "")), ds)
+                for ds in datasets
+                if _dataset_name_matches(query, ds.get("name", ""))
+            ),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        filtered = [dict(ds, match_score=round(score, 4)) for score, ds in ranked]
+    else:
+        filtered = datasets
+    page = filtered[offset : offset + limit]
     return {
-        "count": 0,
-        "datasets": [],
-        "aliases": DATASET_ALIASES,
-        "error": error,
-        "note": "Live catalog unavailable. Try again, or pass a bare dataset_id starting with 'gd_'.",
+        "count": len(page),
+        "total": len(filtered),
+        "catalog_total": len(datasets),
+        "offset": offset,
+        "limit": limit,
+        "datasets": page,
     }
+
 
 # ═════════════════════════════════════════════════════════════════
 # RUN SERVER
 # ═════════════════════════════════════════════════════════════════
+
 
 def run_server():
     args = parse_args()
@@ -807,11 +1057,20 @@ def run_server():
 
     print("[brightdata-free-mcp] Starting server", file=sys.stderr)
     print(f"[brightdata-free-mcp] Transport: {transport}", file=sys.stderr)
-    print(f"[brightdata-free-mcp] Host: {args.host}, Port: {args.port}, Path: {args.path}", file=sys.stderr)
-    print("[brightdata-free-mcp] Free pool: 5,000 credits/month "
-          "(Web Scraper + SERP + Web Unlocker); Discover is separate", file=sys.stderr)
-    print(f"[brightdata-free-mcp] API token configured: "
-          f"{bool(API_TOKEN and API_TOKEN != 'YOUR_API_KEY')}", file=sys.stderr)
+    print(
+        f"[brightdata-free-mcp] Host: {args.host}, Port: {args.port}, Path: {args.path}",
+        file=sys.stderr,
+    )
+    print(
+        "[brightdata-free-mcp] Free pool: 5,000 credits/month "
+        "(Web Scraper + SERP + Web Unlocker); Discover is separate",
+        file=sys.stderr,
+    )
+    print(
+        f"[brightdata-free-mcp] API token configured: "
+        f"{bool(API_TOKEN and API_TOKEN != 'YOUR_API_KEY')}",
+        file=sys.stderr,
+    )
 
     if transport == "stdio":
         mcp.run(transport="stdio")
