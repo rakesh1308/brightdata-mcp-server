@@ -102,6 +102,68 @@ class BrightDataMCPTests(unittest.TestCase):
 
         self.assertEqual(result["results"], [{"name": "item"}])
         self.assertEqual(post.call_args.kwargs["json"], [{"url": "https://example.com/item"}])
+        self.assertEqual(post.call_args.kwargs["params"], {
+            "dataset_id": "gd_test", "format": "json"
+        })
+
+    @patch.object(server, "resolve_dataset", return_value="gd_shopping")
+    @patch.object(server.requests, "post")
+    def test_scrape_accepts_dataset_specific_inputs(self, post, _resolve):
+        post.return_value = FakeResponse(json_data=[{"title": "Headphones"}])
+        inputs = [{
+            "url": "https://www.google.com/search?ibp=oshop&q=headphones",
+            "country": "US",
+        }]
+
+        result = server.scrape("google shopping", inputs=inputs)
+
+        self.assertEqual(result["results"], [{"title": "Headphones"}])
+        self.assertEqual(post.call_args.kwargs["json"], inputs)
+
+    @patch.object(server, "resolve_dataset", return_value="gd_shopping")
+    @patch.object(server.requests, "post")
+    def test_scrape_surfaces_validation_details_without_async_retry(self, post, _resolve):
+        post.return_value = FakeResponse(
+            status_code=400,
+            json_data={
+                "error": "Invalid input provided",
+                "code": "validation_error",
+                "errors": [["url", "Value should match pattern ^https://..."]],
+            },
+        )
+
+        result = server.scrape("google shopping", ["https://google.com/search?tbm=shop&q=x"])
+
+        self.assertEqual(result["status_code"], 400)
+        self.assertEqual(result["details"]["code"], "validation_error")
+        self.assertIn("inputs=[{...}]", result["hint"])
+        self.assertFalse(result["retryable"])
+        post.assert_called_once()
+
+    @patch.object(server, "resolve_dataset", return_value="gd_test")
+    @patch.object(server.requests, "post")
+    def test_scrape_explains_non_collectable_catalog_entry(self, post, _resolve):
+        post.return_value = FakeResponse(
+            status_code=400,
+            json_data=ValueError("not JSON"),
+            text="This dataset does not support collection",
+        )
+
+        result = server.scrape("example test", ["https://example.com"])
+
+        self.assertEqual(result["details"], "This dataset does not support collection")
+        self.assertIn("cannot be collected", result["hint"])
+        self.assertIn("Retrying asynchronously will not fix", result["hint"])
+        post.assert_called_once()
+
+    @patch.object(server, "resolve_dataset", return_value="gd_test")
+    def test_scrape_rejects_urls_and_inputs_together(self, _resolve):
+        with self.assertRaisesRegex(ValueError, "either urls or inputs"):
+            server.scrape(
+                "example",
+                urls=["https://example.com"],
+                inputs=[{"url": "https://example.org"}],
+            )
 
     @patch.object(server, "resolve_dataset", return_value="gd_test")
     @patch.object(server.requests, "post")

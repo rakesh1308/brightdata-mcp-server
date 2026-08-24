@@ -32,7 +32,7 @@ flowchart LR
 | `scrape_as_html` | Retrieve the complete unlocked HTML response |
 | `scrape_batch` | Retrieve up to 10 pages concurrently as Markdown |
 | `discover` | Run AI-ranked public-web discovery with intent, date, locale, and keyword options |
-| `scrape` | Run any collect-by-URL Web Scraper dataset synchronously or asynchronously |
+| `scrape` | Run collectable Web Scraper datasets with URL shorthand or dataset-specific input objects |
 | `scrape_poll` | Poll snapshot progress and download completed JSON, NDJSON, JSONL, or CSV results |
 | `list_datasets` | Read and cache the live dataset catalog and available dataset IDs |
 
@@ -126,9 +126,23 @@ scrape(
 )
 ```
 
+Datasets often enforce their own fields and URL patterns. Use `inputs` instead of `urls` when extra fields are required:
+
+```text
+scrape(
+  dataset="google shopping",
+  inputs=[{
+    "url": "https://www.google.com/search?ibp=oshop&q=wireless+headphones",
+    "country": "US"
+  }]
+)
+```
+
+Pass either `urls` or `inputs`, not both. If Bright Data rejects an input, the tool returns its validation body—including required fields or URL patterns—and an actionable hint. Validation failures are not automatically retried asynchronously because the same invalid input would fail again.
+
 Common aliases include `linkedin_profile`, `linkedin_jobs`, `linkedin_company`, `amazon_product`, `amazon_product_reviews`, `instagram_profile`, `tiktok_posts`, `reddit_posts`, and `crunchbase_company`.
 
-Synchronous requests accept up to 20 URLs. Use `async_mode=True` for larger jobs, then pass the returned snapshot ID to `scrape_poll`.
+Synchronous requests accept up to 20 inputs. Use `async_mode=True` for larger jobs, then pass the returned snapshot ID to `scrape_poll`.
 
 ## Testing
 

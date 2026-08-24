@@ -31,6 +31,7 @@ Run:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -231,8 +232,7 @@ def _coerce_to_list(value) -> list:
         # JSON array?
         if v.startswith("[") and v.endswith("]"):
             try:
-                import json as _json
-                parsed = _json.loads(v)
+                parsed = json.loads(v)
                 if isinstance(parsed, list):
                     return [str(x) for x in parsed if x is not None]
             except ValueError:
@@ -245,6 +245,22 @@ def _coerce_to_list(value) -> list:
     if isinstance(value, (list, tuple)):
         return [str(x) for x in value if x is not None]
     return [str(value)]
+
+
+def _coerce_scrape_inputs(value) -> list[dict]:
+    """Normalize dataset-specific scraper inputs to a non-empty list of objects."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError as exc:
+            raise ValueError("inputs must be valid JSON when provided as a string") from exc
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("inputs must contain at least one object")
+    if not all(isinstance(item, dict) and item for item in value):
+        raise ValueError("every item in inputs must be a non-empty object")
+    return [dict(item) for item in value]
 
 
 def _validate_choice(value: str, allowed: set, parameter: str) -> str:
@@ -264,6 +280,54 @@ def _response_json(response: requests.Response):
             f"Bright Data returned non-JSON content (HTTP {response.status_code}): "
             f"{response.text[:300]}"
         ) from exc
+
+
+def _error_details(response: requests.Response):
+    """Return a bounded JSON or text error body without exposing request headers."""
+    try:
+        return response.json()
+    except ValueError:
+        return response.text[:2000] or "Bright Data returned an empty error response."
+
+
+def _scrape_error(response: requests.Response, dataset_id: str, async_mode: bool) -> dict:
+    """Build an actionable MCP result for a rejected Web Scraper API request."""
+    details = _error_details(response)
+    searchable = json.dumps(details, ensure_ascii=True) if not isinstance(details, str) else details
+    searchable = searchable.lower()
+
+    if "does not support collection" in searchable or "not allowed for api" in searchable:
+        hint = (
+            "This catalog entry cannot be collected through the Web Scraper API. "
+            "Choose a collectable scraper dataset from Bright Data's Scrapers Library. "
+            "Retrying asynchronously will not fix this error."
+        )
+    elif response.status_code == 400 and (
+        "validation" in searchable or "invalid input" in searchable
+    ):
+        hint = (
+            "The input does not match this dataset's schema. Inspect details.errors for "
+            "the required fields or URL pattern, then call scrape with inputs=[{...}]. "
+            "Retrying asynchronously will not fix an invalid input."
+        )
+    elif response.status_code in {401, 403}:
+        hint = "Check the Bright Data API key and this account's access to the selected dataset."
+    elif response.status_code == 429:
+        hint = "Bright Data rate-limited the request. Wait before retrying."
+    elif response.status_code >= 500:
+        hint = "Bright Data returned a server error. Retry later or use async mode for a large valid job."
+    else:
+        hint = "Review the Bright Data error details and the selected dataset's input schema."
+
+    return {
+        "error": "Bright Data Web Scraper API rejected the request.",
+        "status_code": response.status_code,
+        "dataset_id": dataset_id,
+        "mode": "async" if async_mode else "sync",
+        "details": details,
+        "hint": hint,
+        "retryable": response.status_code == 429 or response.status_code >= 500,
+    }
 
 
 def _run_parallel(items: list, worker) -> list:
@@ -311,7 +375,7 @@ def health(request):
 def root(request):
     return JSONResponse({
         "name": "brightdata-free-mcp",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "mcp_endpoint": MCP_PATH,
         "transport": MCP_TRANSPORT,
         "billing": "5,000 monthly free credits: Web Scraper + SERP + Web Unlocker. "
@@ -572,18 +636,22 @@ def discover(
 @mcp.tool()
 def scrape(
     dataset: str,
-    urls: list,
+    urls: list | None = None,
+    inputs: list | None = None,
     async_mode: bool = False,
     output_format: str = "json",
 ) -> dict:
     """
-    Generic Web Scraper entrypoint — any dataset, any URLs.
+    Generic Web Scraper entrypoint for collectable Bright Data scraper datasets.
     Cost: 1 free-tier credit / API call for eligible accounts.
 
     Args:
         dataset: Friendly name or bare gd_* id. Resolved against live catalog.
-        urls: List of URLs (or a single string, or comma-separated string).
-              Max 20 URLs for sync, thousands for async.
+        urls: List of collect-by-URL targets (or a single/comma-separated string).
+              This shorthand creates one {"url": value} object per URL.
+        inputs: Dataset-specific input objects. Use instead of urls when the
+                dataset requires fields such as country, keyword, or product ID.
+                Example: [{"url": "https://...", "country": "US"}].
         async_mode: True returns snapshot_id (poll with scrape_poll).
         output_format: "json", "ndjson", "jsonl", or "csv".
 
@@ -593,17 +661,33 @@ def scrape(
     """
     output_format = _validate_choice(output_format, {"json", "ndjson", "jsonl", "csv"}, "output_format")
     real_id = resolve_dataset(dataset)
-    url_list = _coerce_to_list(urls)
-    if not url_list:
-        return {"error": "No URLs provided. Pass a list, single string, or comma-separated string."}
-    if not async_mode and len(url_list) > 20:
-        raise ValueError("Synchronous scraping accepts at most 20 URLs; set async_mode=True for larger batches.")
+
+    if urls is not None and inputs is not None:
+        raise ValueError("Pass either urls or inputs, not both.")
+    if inputs is not None:
+        input_rows = _coerce_scrape_inputs(inputs)
+    else:
+        url_list = _coerce_to_list(urls)
+        if not url_list:
+            return {
+                "error": "No scraper inputs provided.",
+                "hint": "Pass urls=[...] or dataset-specific inputs=[{...}].",
+            }
+        input_rows = [{"url": url} for url in url_list]
+
+    if not async_mode and len(input_rows) > 20:
+        raise ValueError("Synchronous scraping accepts at most 20 inputs; set async_mode=True for larger batches.")
     endpoint = DATASETS_TRIGGER if async_mode else DATASETS_SCRAPE
     timeout = 60 if async_mode else 120
     response = requests.post(
-        f"{endpoint}?dataset_id={real_id}&format={output_format}",
-        headers=headers, json=[{"url": u} for u in url_list], timeout=timeout,
+        endpoint,
+        params={"dataset_id": real_id, "format": output_format},
+        headers=headers,
+        json=input_rows,
+        timeout=timeout,
     )
+    if response.status_code >= 400:
+        return _scrape_error(response, real_id, async_mode)
     response.raise_for_status()
     if async_mode or response.status_code == 202:
         data = _response_json(response)
