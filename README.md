@@ -5,7 +5,7 @@
 [![CI](https://github.com/rakesh1308/brightdata-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/rakesh1308/brightdata-mcp-server/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A compact, self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) server for Bright Data. It exposes nine tools for web search, anti-bot page retrieval, structured dataset scraping, asynchronous snapshot collection, and AI-ranked discovery.
+A compact, self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) server for Bright Data. It exposes eight tools for web search, anti-bot page retrieval, structured dataset scraping, and asynchronous snapshot collection.
 
 The project demonstrates production-oriented API integration: live dataset resolution instead of stale IDs, validated request parameters, concurrent batch execution, async trigger/poll/download workflows, Streamable HTTP deployment, and contract-focused tests.
 
@@ -17,7 +17,6 @@ flowchart LR
     Server --> SERP[SERP API]
     Server --> Unlocker[Web Unlocker API]
     Server --> Scrapers[Web Scraper API]
-    Server --> Discover[Discover API]
     Scrapers --> Catalog[Live dataset catalog]
     Scrapers --> Snapshot[Progress and snapshot APIs]
 ```
@@ -31,7 +30,6 @@ flowchart LR
 | `scrape_as_markdown` | Retrieve an unlocked page using Bright Data's native Markdown conversion |
 | `scrape_as_html` | Retrieve the complete unlocked HTML response |
 | `scrape_batch` | Retrieve up to 10 pages concurrently as Markdown |
-| `discover` | Run AI-ranked public-web discovery with intent, date, locale, and keyword options |
 | `scrape` | Run collectable Web Scraper datasets with URL shorthand or dataset-specific input objects |
 | `scrape_poll` | Poll snapshot progress and download completed JSON, NDJSON, JSONL, or CSV results |
 | `list_datasets` | Search and paginate the live account dataset catalog and current dataset IDs |
@@ -41,7 +39,6 @@ flowchart LR
 - Use `search_engine` when you need broad or recent search results.
 - Use `scrape_as_markdown` when you need readable content from an arbitrary page.
 - Use `scrape` when Bright Data has a structured scraper for the target site.
-- Use `discover` for intent-ranked research. It is a separate account-gated product and is not a replacement for exhaustive vertical search.
 - For job research, search for job URLs first and then pass those URLs to the appropriate structured dataset scraper.
 
 ## Quick start
@@ -162,7 +159,7 @@ Run the authenticated end-to-end proof suite when you intentionally want to spen
 python live_smoke_test.py
 ```
 
-It exercises every tool, including Google and Bing search behavior, Web Unlocker Markdown/HTML/batch retrieval, Discover, the live dataset catalog, synchronous dataset scraping, and the complete async trigger/poll/download lifecycle. It prints pass/fail metadata only—never credentials or scraped content. Override `BRIGHTDATA_SMOKE_DATASET_NAME` and `BRIGHTDATA_SMOKE_INPUTS` to test another current scraper without changing code.
+It exercises every tool, including Google and Bing search behavior, Web Unlocker Markdown/HTML/batch retrieval, the live dataset catalog, synchronous dataset scraping, and the complete async trigger/poll/download lifecycle. It prints pass/fail metadata only—never credentials or scraped content. Override `BRIGHTDATA_SMOKE_DATASET_NAME` and `BRIGHTDATA_SMOKE_INPUTS` to test another current scraper without changing code.
 
 ## Deploying on Zeabur
 
@@ -186,7 +183,7 @@ The included [`Dockerfile`](Dockerfile) and [`zeabur.json`](zeabur.json) run the
 
 ## Billing notes
 
-Eligible Bright Data accounts receive a shared monthly free-credit allowance for Web Unlocker, SERP, Web Scraper, and Scraper Studio. Discover is a separate account-gated API. Usage and product eligibility can change, so verify the current details in the [Bright Data free-tier documentation](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier).
+Eligible Bright Data accounts receive a shared monthly free-credit allowance for Web Unlocker, SERP, Web Scraper, and Scraper Studio. Usage and product eligibility can change, so verify the current details in the [Bright Data free-tier documentation](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier).
 
 ## Official documentation
 
@@ -195,7 +192,6 @@ Eligible Bright Data accounts receive a shared monthly free-credit allowance for
 - [Asynchronous scraper requests](https://docs.brightdata.com/api-reference/rest-api/scraper/asynchronous-requests)
 - [SERP API](https://docs.brightdata.com/scraping-automation/serp-api/introduction)
 - [Web Unlocker API](https://docs.brightdata.com/scraping-automation/web-unlocker/introduction)
-- [Discover API](https://docs.brightdata.com/api-reference/discover/overview)
 
 ## License
 

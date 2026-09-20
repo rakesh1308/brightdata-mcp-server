@@ -67,15 +67,6 @@ def main() -> int:
             ]
         ),
     )
-    run(
-        "discover",
-        lambda: server.discover(
-            "Bright Data MCP documentation",
-            intent="Find the official Bright Data MCP documentation",
-            limit=1,
-            max_wait_seconds=120,
-        ),
-    )
     catalog = run(
         "list_datasets",
         lambda: server.list_datasets(

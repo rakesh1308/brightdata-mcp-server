@@ -152,36 +152,6 @@ class BrightDataMCPTests(unittest.TestCase):
             )
         )
 
-    @patch.object(server.requests, "get")
-    @patch.object(server.requests, "post")
-    def test_discover_uses_trigger_then_poll_contract(self, post, get):
-        post.return_value = FakeResponse(
-            json_data={"status": "ok", "task_id": "task-1"}
-        )
-        get.return_value = FakeResponse(
-            json_data={"status": "done", "results": [{"title": "A"}]}
-        )
-
-        result = server.discover("AI trends", intent="authoritative", limit=5)
-
-        self.assertEqual(result["status"], "done")
-        self.assertEqual(post.call_args.args[0], server.DISCOVER_URL)
-        self.assertEqual(post.call_args.kwargs["json"]["num_results"], 5)
-        self.assertEqual(post.call_args.kwargs["json"]["mode"], "standard")
-        self.assertEqual(get.call_args.kwargs["params"], {"task_id": "task-1"})
-
-    @patch.object(server.requests, "post")
-    def test_discover_supports_current_search_modes(self, post):
-        post.return_value = FakeResponse(json_data={"task_id": "task-1"})
-
-        server.discover("broad research", mode="zeroRanking", max_wait_seconds=0)
-
-        self.assertEqual(post.call_args.kwargs["json"]["mode"], "zeroRanking")
-
-    def test_discover_rejects_unsupported_zero_ranking_content(self):
-        with self.assertRaisesRegex(ValueError, "include_content"):
-            server.discover("broad research", mode="zeroRanking", include_content=True)
-
     @patch.object(server, "resolve_dataset", return_value="gd_test")
     @patch.object(server.requests, "post")
     def test_scrape_sync_handles_json(self, post, _resolve):

@@ -8,9 +8,6 @@ free pool (per https://docs.brightdata.com/general/account/billing-and-pricing/f
   • SERP API           — Google / Bing / Yandex structured search
   • Web Unlocker API   — bypass anti-bot, fetch any page (markdown or HTML)
 
-Discover API is also exposed, but it is a separate account-gated product and is
-not part of the documented monthly free-credit pool.
-
 Authentication:
   Uses your Bright Data **API key** (NOT a token, NOT prefixed with brd_).
   Generate it at https://brightdata.com/cp/setting/users → "Add API key".
@@ -84,7 +81,6 @@ DATASETS_TRIGGER = f"{BASE_URL}/datasets/v3/trigger"
 DATASETS_SNAPSHOT = f"{BASE_URL}/datasets/v3/snapshot"
 DATASETS_PROGRESS = f"{BASE_URL}/datasets/v3/progress"
 DATASETS_LIST = f"{BASE_URL}/datasets/list"
-DISCOVER_URL = f"{BASE_URL}/discover"
 REQUEST_URL = f"{BASE_URL}/request"  # SERP + Web Unlocker
 
 SERP_ZONE = os.getenv("SERP_ZONE", "").strip()
@@ -486,7 +482,6 @@ TOOL_NAMES = (
     "scrape_as_markdown",
     "scrape_as_html",
     "scrape_batch",
-    "discover",
     "scrape",
     "scrape_poll",
     "list_datasets",
@@ -528,8 +523,7 @@ def root(request):
             "version": SERVER_VERSION,
             "mcp_endpoint": MCP_PATH,
             "transport": MCP_TRANSPORT,
-            "billing": "5,000 monthly free credits: Web Scraper + SERP + Web Unlocker. "
-            "Discover API is separate and account-gated.",
+            "billing": "5,000 monthly free credits: Web Scraper + SERP + Web Unlocker.",
             "auth_env_var": "BRIGHTDATA_API_KEY",
             "auth_legacy_alias": "BRIGHTDATA_API_TOKEN",
             "tool_count": len(TOOL_NAMES),
@@ -610,8 +604,15 @@ def search_engine(
     }
     if country:
         payload["country"] = country
+    # Bright Data's SERP endpoint occasionally returns an empty HTTP 200 body
+    # (and then blocks retries of the same query for a short window with a
+    # "recently failed" notice). Retry once after a short pause before failing.
     r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
     _raise_for_api_error(r, f"{engine} search")
+    if effective_format == "json" and not r.text.strip():
+        time.sleep(2)
+        r = requests.post(REQUEST_URL, headers=headers, json=payload, timeout=60)
+        _raise_for_api_error(r, f"{engine} search")
     if effective_format == "json":
         return _response_json(r)
     return {
@@ -732,119 +733,6 @@ def scrape_batch(urls: list[str]) -> dict:
 
     results = _run_parallel(url_list, worker)
     return {"results": results, "count": len(results)}
-
-
-@mcp.tool()
-def discover(
-    query: str,
-    intent: str | None = None,
-    mode: Literal["standard", "zeroRanking", "deep", "fast"] = "standard",
-    start_date: str | None = None,
-    end_date: str | None = None,
-    limit: int = 10,
-    country: str | None = None,
-    city: str | None = None,
-    language: str | None = None,
-    filter_keywords: list[str] | None = None,
-    include_content: bool = False,
-    include_images: bool = False,
-    remove_duplicates: bool = True,
-    output_format: Literal["json", "md"] = "json",
-    max_wait_seconds: int = 120,
-) -> dict:
-    """
-    Search the public web and rank results using an AI-driven intent.
-
-    Discover API is a separate, account-gated Bright Data product. It is not a
-    dataset scraper and does not accept dataset IDs. The tool triggers a task and
-    polls it until completion. Set max_wait_seconds=0 to return the task ID.
-
-    Args:
-        query: Natural-language query.
-        intent: Optional AI intent hint.
-        start_date / end_date: Optional ISO date filters.
-        limit: Exact result count, from 1 to 20.
-        output_format: "json" or "md".
-    """
-    if not query or not query.strip():
-        raise ValueError("query must not be empty")
-    query = query.strip()
-    if len(query) > 1500:
-        raise ValueError("query must contain at most 1500 characters")
-    if intent and len(intent) > 3000:
-        raise ValueError("intent must contain at most 3000 characters")
-    if not 1 <= limit <= 20:
-        raise ValueError("limit must be between 1 and 20")
-    mode = _validate_choice(mode, {"standard", "zeroranking", "deep", "fast"}, "mode")
-    if mode == "zeroranking" and include_content:
-        raise ValueError("include_content is not supported when mode='zeroRanking'")
-    output_format = _validate_choice(output_format, {"json", "md"}, "output_format")
-    normalized_country = _validate_country(country)
-    payload = {
-        "query": query,
-        "num_results": limit,
-        "format": output_format,
-        "mode": "zeroRanking" if mode == "zeroranking" else mode,
-        "include_content": include_content,
-        "include_images": include_images,
-        "remove_duplicates": remove_duplicates,
-    }
-    if normalized_country:
-        payload["country"] = normalized_country.upper()
-    if language:
-        payload["language"] = str(language).strip()
-    if intent:
-        payload["intent"] = intent
-    if start_date:
-        payload["start_date"] = start_date
-    if end_date:
-        payload["end_date"] = end_date
-    if city:
-        payload["city"] = city
-    keywords = _coerce_to_list(filter_keywords)
-    if keywords:
-        payload["filter_keywords"] = keywords
-
-    _require_api_key()
-    response = requests.post(
-        DISCOVER_URL,
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
-    if response.status_code == 403:
-        return {
-            "error": "Discover API is not enabled for this Bright Data account.",
-            "hint": "Ask your Bright Data account manager to enable Discover API, or use search_engine.",
-        }
-    _raise_for_api_error(response, "Discover trigger")
-    task = _response_json(response)
-    task_id = task.get("task_id")
-    if not task_id or max_wait_seconds <= 0:
-        return task
-
-    deadline = time.monotonic() + max_wait_seconds
-    while True:
-        result_response = requests.get(
-            DISCOVER_URL,
-            headers=headers,
-            params={"task_id": task_id},
-            timeout=60,
-        )
-        _raise_for_api_error(result_response, "Discover polling")
-        result = _response_json(result_response)
-        status = str(result.get("status", "")).lower()
-        if status in {"done", "ready", "completed"}:
-            return result
-        if status in {"failed", "error", "canceled", "cancelled"}:
-            return result
-        if time.monotonic() >= deadline:
-            return {
-                "status": status or "running",
-                "task_id": task_id,
-                "error": f"Timeout after {max_wait_seconds}s; task is still processing.",
-            }
-        time.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
 @mcp.tool()
@@ -1063,7 +951,7 @@ def run_server():
     )
     print(
         "[brightdata-free-mcp] Free pool: 5,000 credits/month "
-        "(Web Scraper + SERP + Web Unlocker); Discover is separate",
+        "(Web Scraper + SERP + Web Unlocker)",
         file=sys.stderr,
     )
     print(
